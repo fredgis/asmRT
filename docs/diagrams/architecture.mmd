@@ -1,0 +1,28 @@
+flowchart TB
+    subgraph RT["asmRT · local Rust POC"]
+        CLI["CLI / browser<br>conversation or storage demo"]
+        W["Rust task handlers<br>four agent roles or concurrent workers"]
+        A["State Actor<br>bounded queue · serialized operations"]
+        C["Compact task codec<br>state · attempt · owner · job and reply hashes"]
+        CLI --> W
+        W -->|"enqueue / claim / complete"| A
+        A --- C
+    end
+    A -->|"one MCP / stdio session"| M["Existing Node MCP bridge"]
+    M -->|"one native child"| DB[("asmDB · unchanged<br>one writer per database")]
+    DB --> F[(".dat + .wal + .cdc")]
+    W -->|"sequential conversation turns"| L["Local Ollama<br>one tiny model · four roles"]
+    W -->|"persist before completion"| P["Saved jobs and replies<br>files, not database payloads"]
+    F -. "future read-only CDC follower" .-> S["Future scheduler wake-ups<br>not part of this POC"]
+    classDef runtime fill:#082a40,stroke:#20ddf4,stroke-width:2px,color:#f3f7fc
+    classDef existing fill:#172238,stroke:#94acc5,stroke-width:2px,color:#f3f7fc
+    classDef storage fill:#332517,stroke:#ff961f,stroke-width:2px,color:#fff0d7
+    classDef payload fill:#241d3c,stroke:#b69afa,stroke-width:2px,color:#f3f7fc
+    classDef future fill:#2a2520,stroke:#ff961f,stroke-dasharray:6 5,color:#ffe4bd
+    class CLI,W,A,C runtime
+    class M,L existing
+    class DB,F storage
+    class P payload
+    class S future
+    style RT fill:#071b2d,stroke:#358399,color:#d5f6ff
+    linkStyle default stroke:#64889f,stroke-width:2px

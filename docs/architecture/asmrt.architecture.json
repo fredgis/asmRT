@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "asmRT — durable agent coordination",
+    "subtitle": "Proposed local architecture · asmDB unchanged · one coordinator and writer per database",
+    "output": "asmrt.html",
+    "viewBox": [1280, 780]
+  },
+  "components": [
+    { "id": "workers", "type": "frontend", "label": "Concurrent agents", "sublabel": "Deterministic POC first", "pos": [50, 170], "size": [175, 70] },
+    { "id": "scheduler", "type": "backend", "label": "Scheduler", "sublabel": "Dispatch + reconcile", "pos": [275, 170], "size": [175, 70] },
+    { "id": "actor", "type": "backend", "label": "State Actor", "sublabel": "ONE operation queue", "tag": "SOLE MCP OWNER", "pos": [500, 170], "size": [175, 70] },
+    { "id": "bridge", "type": "external", "label": "asmdb-mcp (Node)", "sublabel": "ONE session / existing", "pos": [785, 170], "size": [175, 70] },
+    { "id": "engine", "type": "database", "label": "asmDB", "sublabel": "UNCHANGED / one writer", "pos": [1060, 170], "size": [175, 70] },
+    { "id": "files", "type": "database", "label": ".dat / .wal / .cdc", "sublabel": "One database / table", "pos": [1060, 410], "size": [175, 70] },
+    { "id": "follower", "type": "backend", "label": "CDC follower", "sublabel": "Read-only / planned", "pos": [500, 410], "size": [175, 70] },
+    { "id": "payloads", "type": "external", "label": "External payloads", "sublabel": "Files / object storage", "tag": "REFERENCES IN STATE", "pos": [50, 595], "size": [175, 70] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "asmRT / Rust — modules to build", "wraps": ["workers", "scheduler", "actor", "follower"] }
+  ],
+  "connections": [
+    { "from": "workers", "to": "scheduler", "variant": "emphasis" },
+    { "from": "scheduler", "to": "actor", "variant": "emphasis" },
+    { "from": "actor", "to": "bridge", "label": "MCP / stdio", "variant": "emphasis" },
+    { "from": "bridge", "to": "engine", "label": "stdin / stdout", "variant": "emphasis" },
+    { "from": "engine", "to": "files", "label": "persist", "fromSide": "bottom", "toSide": "top", "labelAt": [1172, 335] },
+    { "from": "files", "to": "follower", "label": "read .cdc file / planned", "variant": "dashed", "fromSide": "left", "toSide": "right" },
+    { "from": "follower", "to": "scheduler", "label": "wake + re-check", "variant": "dashed", "fromSide": "left", "toSide": "bottom", "via": [[362.5, 445]], "labelAt": [360, 340] },
+    { "from": "workers", "to": "payloads", "label": "large payloads", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelAt": [147, 535] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "In asmDB", "items": ["IDs, status, owner, attempt and retry metadata", "Compact checkpoint markers and artifact references", "256-byte records; tag <=39 B; content <=175 B"] },
+    { "dot": "orange", "title": "Outside asmDB", "items": ["Prompts, conversations, documents and source code", "Large tool outputs, logs, embeddings and model weights", "The diagram describes planned asmRT modules"] },
+    { "dot": "amber", "title": "Not automatic guarantees", "items": ["A serialized queue is not a multi-row transaction", "CDC is a file, not a broker or MCP event stream", "Replay-safe coordination is not exactly-once tool execution"] }
+  ]
+}

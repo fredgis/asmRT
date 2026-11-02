@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="asmRT project design: Rust orchestration, one asmDB writer, compact durable coordination state and external payload storage.">
+<link rel="icon" href="data:,">
+<title>asmRT — project summary</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #041322;
+    --panel: #081e30;
+    --ink: #f3f7fc;
+    --muted: #afc3d8;
+    --cyan: #20ddf4;
+    --orange: #ff961f;
+    --line: #24465d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: "Segoe UI", Arial, sans-serif; }
+  .poster { position: relative; isolation: isolate; width: 1440px; padding: 54px 64px 48px; overflow: hidden; background: radial-gradient(ellipse at 0 0, #083957 0, transparent 36%), radial-gradient(ellipse at 100% 100%, #422612 0, transparent 29%), var(--bg); }
+  .poster::before { position: absolute; z-index: -1; content: ""; width: 620px; height: 620px; top: -495px; left: -120px; transform: rotate(-34deg); background: #17cfea; opacity: .12; }
+  .status { display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 18px; font-weight: 600; letter-spacing: 3px; }
+  .status::before { content: ""; width: 9px; height: 9px; background: var(--orange); border-radius: 50%; }
+  .brand { display: flex; align-items: center; gap: 32px; margin: 30px 0 22px; }
+  .brand-icon { width: 96px; height: 106px; flex: 0 0 auto; color: var(--cyan); }
+  .wordmark { font-size: 96px; font-weight: 800; line-height: 1; letter-spacing: -4px; }
+  .wordmark span { color: var(--orange); }
+  .brand-rule { width: 2px; height: 76px; background: var(--line); margin: 0 6px; }
+  .brand-title { font-size: 34px; line-height: 1.25; font-weight: 600; letter-spacing: -.5px; }
+  .brand-title span { color: var(--muted); font-size: 24px; font-weight: 400; }
+  .lede { margin: 0; color: var(--muted); font-size: 27px; line-height: 1.5; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+  .architecture { margin-top: 34px; padding: 28px 24px 22px; border: 1px solid #2a526b; border-radius: 24px; background: linear-gradient(130deg, #0a263b, #061b2c 65%); }
+  .section-top { padding: 0 8px; }
+  .eyebrow { margin: 0 0 10px; font-size: 17px; font-weight: 600; letter-spacing: 2px; color: var(--cyan); }
+  h1, h2, h3, p { margin-top: 0; }
+  h1 { margin: 0 0 8px; font-size: 41px; line-height: 1.2; letter-spacing: -.7px; }
+  .intro { margin-bottom: 10px; color: var(--muted); font-size: 22px; line-height: 1.4; }
+  .system { display: block; width: 100%; height: auto; }
+  .system text { font-family: "Segoe UI", Arial, sans-serif; }
+  .runtime { fill: #082337; stroke: #24718a; stroke-width: 1.5; stroke-dasharray: 7 6; }
+  .node { fill: #0a2b42; stroke: #35bcd5; stroke-width: 1.7; }
+  .actor { fill: #30241d; stroke: var(--orange); stroke-width: 2; }
+  .external { fill: #101f2d; stroke: #668ba6; stroke-width: 1.5; }
+  .files { fill: #071927; stroke: #28718a; stroke-width: 1.5; }
+  .event-node { fill: #24221f; stroke: var(--orange); stroke-width: 1.5; }
+  .label { fill: var(--ink); font-size: 23px; font-weight: 650; text-anchor: middle; }
+  .sub { fill: var(--muted); font-size: 17px; text-anchor: middle; }
+  .caption { fill: var(--muted); font-size: 17px; }
+  .accent { fill: var(--cyan); }
+  .warm { fill: var(--orange); }
+  .flow { fill: none; stroke: var(--cyan); stroke-width: 2.5; stroke-linejoin: round; }
+  .event { fill: none; stroke: var(--orange); stroke-width: 2.5; stroke-dasharray: 8 5; stroke-linejoin: round; }
+  .payload-flow { fill: none; stroke: #7296b0; stroke-width: 2; stroke-dasharray: 5 5; }
+  .arch-note { margin: 0; padding: 8px 8px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 20px; }
+  .arch-note strong { color: var(--ink); }
+  .storage { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 26px; }
+  .card { border: 1px solid var(--line); border-radius: 22px; background: #081c2c; padding: 26px 30px 28px; }
+  .card.in { border-top: 3px solid var(--cyan); }
+  .card.out { border-top: 3px solid var(--orange); }
+  .card h2 { font-size: 31px; letter-spacing: -.5px; margin-bottom: 8px; }
+  .card.in h2 { color: var(--cyan); }
+  .card.out h2 { color: var(--orange); }
+  .card p { color: var(--muted); font-size: 20px; margin-bottom: 18px; }
+  .card ul { list-style: none; margin: 0; padding: 0; }
+  .card li { position: relative; padding-left: 22px; margin-top: 13px; font-size: 22px; line-height: 1.4; }
+  .card li::before { content: ""; width: 6px; height: 6px; position: absolute; left: 0; top: 13px; background: var(--cyan); border-radius: 2px; }
+  .card.out li::before { background: var(--orange); }
+  .limits { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 30px; margin-top: 24px; border: 1px solid var(--line); border-radius: 18px; color: var(--muted); font-size: 22px; background: #081a28; }
+  .limits strong { color: var(--ink); font-weight: 600; }
+  .limit { padding-left: 28px; border-left: 1px solid #36536a; }
+  .takeaway { margin-top: 34px; padding-top: 30px; border-top: 1px solid var(--line); }
+  .takeaway h2 { margin-bottom: 13px; font-size: 36px; line-height: 1.25; letter-spacing: -.5px; }
+  .takeaway h2 span { color: var(--orange); }
+  .takeaway p { margin-bottom: 25px; font-size: 22px; color: var(--muted); line-height: 1.5; }
+  .roadmap { display: grid; grid-template-columns: 1fr 1.3fr 1.2fr .8fr 1fr; gap: 18px; }
+  .step { border-top: 2px solid #2b5a71; padding-top: 14px; }
+  .step b { display: block; color: var(--cyan); font-size: 17px; letter-spacing: 2px; margin-bottom: 7px; }
+  .step span { font-size: 21px; line-height: 1.35; }
+  .step:last-child { border-color: #bc762c; }
+  .step:last-child b { color: var(--orange); }
+  .footnote { margin: 27px 0 0; color: #93afc7; font-size: 17px; line-height: 1.5; }
+  @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<main class="poster" aria-label="asmRT project summary poster">
+  <div class="status">PROJECT DESIGN / IMPLEMENTATION PLANNED</div>
+  <header class="brand">
+    <svg class="brand-icon" viewBox="0 0 96 106" aria-hidden="true">
+      <ellipse cx="48" cy="19" rx="40" ry="14" fill="none" stroke="currentColor" stroke-width="5"/>
+      <path d="M8 19v65c0 19 80 19 80 0V19M8 50c0 19 80 19 80 0M8 80c0 19 80 19 80 0" fill="none" stroke="currentColor" stroke-width="5"/>
+    </svg>
+    <div class="wordmark">asm<span>RT</span></div>
+    <div class="brand-rule"></div>
+    <div class="brand-title">Durable AI Agent Runtime<br><span>Powered by asmDB. Orchestrated in Rust.</span></div>
+  </header>
+  <p class="lede">A runtime for <strong>durable multi-agent coordination</strong> — not a store for prompts.<br>Framework-neutral by design. Explicit adapters come later.</p>
+
+  <section class="architecture" aria-labelledby="architecture-title">
+    <div class="section-top">
+      <p class="eyebrow">01 / THE LOCAL ARCHITECTURE</p>
+      <h1 id="architecture-title">Many agents. One writer.</h1>
+      <p class="intro">One State Actor owns the MCP session and serializes whole logical operations.</p>
+    </div>
+    <svg class="system" viewBox="0 0 1260 554" role="img" aria-labelledby="system-title system-desc">
+      <title id="system-title">asmRT local architecture with a single writer</title>
+      <desc id="system-desc">Concurrent workers, a scheduler and a State Actor are Rust modules to build. The State Actor owns one existing Node MCP bridge, which owns one unchanged asmDB writer. A planned read-only Rust CDC follower tails the CDC file and wakes the scheduler. Large payloads stay in external storage.</desc>
+      <defs>
+        <marker id="cyan-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7Z" fill="#20ddf4"/></marker>
+        <marker id="orange-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7Z" fill="#ff961f"/></marker>
+        <marker id="gray-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7Z" fill="#7296b0"/></marker>
+      </defs>
+      <rect class="runtime" x="20" y="28" width="780" height="320" rx="18"/>
+      <text x="44" y="61" class="caption accent" font-weight="600">asmRT / Rust — modules to build</text>
+
+      <path class="flow" d="M244 144H300" marker-end="url(#cyan-arrow)"/>
+      <path class="flow" d="M500 144H556" marker-end="url(#cyan-arrow)"/>
+      <path class="flow" d="M772 144H864" marker-end="url(#cyan-arrow)"/>
+      <path class="flow" d="M1040 144H1090" marker-end="url(#cyan-arrow)"/>
+      <path class="flow" d="M1165 196V274" marker-end="url(#cyan-arrow)"/>
+      <path class="event" d="M1060 392H834V288H772" marker-end="url(#orange-arrow)"/>
+      <path class="event" d="M556 288H400V196" marker-end="url(#orange-arrow)"/>
+      <path class="payload-flow" d="M144 196V418" marker-end="url(#gray-arrow)"/>
+
+      <g data-node="workers">
+        <rect class="node" x="44" y="92" width="200" height="104" rx="13"/>
+        <text x="144" y="121" class="label">Concurrent</text>
+        <text x="144" y="152" class="label">workers</text>
+        <text x="144" y="181" class="sub">Agents / tools</text>
+      </g>
+      <g data-node="scheduler">
+        <rect class="node" x="300" y="92" width="200" height="104" rx="13"/>
+        <text x="400" y="136" class="label">Scheduler</text>
+        <text x="400" y="166" class="sub">Dispatch + recovery</text>
+      </g>
+      <g data-node="actor">
+        <rect class="actor" x="556" y="92" width="216" height="104" rx="13"/>
+        <text x="664" y="136" class="label">State Actor</text>
+        <text x="664" y="166" class="sub">ONE operation queue</text>
+      </g>
+      <text x="664" y="222" class="sub warm" font-weight="700">SOLE MCP OWNER</text>
+      <g data-node="bridge">
+        <rect class="external" x="864" y="92" width="176" height="104" rx="13"/>
+        <text x="952" y="136" class="label" style="font-size:22px">asmdb-mcp</text>
+        <text x="952" y="166" class="sub" style="font-size:16px">Node · one session</text>
+      </g>
+      <g data-node="engine">
+        <rect class="node" x="1090" y="92" width="150" height="104" rx="13"/>
+        <text x="1165" y="128" class="label">asmDB</text>
+        <text x="1165" y="157" class="sub accent" font-weight="700">ONE writer</text>
+        <text x="1165" y="180" class="sub">Unchanged</text>
+      </g>
+      <g data-node="follower">
+        <rect class="event-node" x="556" y="252" width="216" height="72" rx="13"/>
+        <text x="664" y="282" class="label" style="font-size:22px">CDC follower</text>
+        <text x="664" y="307" class="sub">Rust · read-only</text>
+      </g>
+      <rect class="files" x="1060" y="274" width="190" height="164" rx="13"/>
+      <text x="1155" y="303" class="sub">Per database</text>
+      <text x="1155" y="334" class="label" style="font-size:22px">.dat + .wal</text>
+      <path d="M1078 353H1232" fill="none" stroke="#24465d"/>
+      <text x="1155" y="393" class="label warm" style="font-size:28px">.cdc</text>
+      <text x="1155" y="420" class="sub">Change log</text>
+
+      <text x="818" y="103" class="sub accent" style="font-size:15px">MCP</text>
+      <text x="818" y="125" class="sub" style="font-size:15px">stdio</text>
+      <text x="1065" y="128" class="sub" style="font-size:13px">stdio</text>
+      <text x="1182" y="240" class="caption">persist</text>
+      <text x="940" y="378" class="sub warm">read .cdc</text>
+      <text x="480" y="272" class="sub warm" style="font-size:16px">wake + re-check</text>
+      <text x="163" y="383" class="caption">payloads</text>
+
+      <rect class="external" x="20" y="418" width="752" height="108" rx="13"/>
+      <text x="44" y="451" class="caption" style="fill:var(--ink);font-size:23px;font-weight:650">External payload storage</text>
+      <text x="44" y="481" class="caption" style="font-size:19px">Prompts · conversations · code · documents · embeddings</text>
+      <text x="44" y="508" class="caption accent">Only short references enter coordination state.</text>
+      <text x="834" y="484" class="caption warm">CDC follower: planned, not built in</text>
+      <text x="834" y="514" class="caption">A file to consume — not a broker</text>
+    </svg>
+    <p class="arch-note"><strong>One writer per database.</strong> asmDB stays unchanged. No engine fork. No FFI.</p>
+  </section>
+
+  <section class="storage" aria-label="Data placement">
+    <div class="card in">
+      <h2>IN asmDB</h2>
+      <p>Small records. Durable decisions.</p>
+      <ul>
+        <li>Task, run and agent IDs</li>
+        <li>Status, owner and attempts</li>
+        <li>Retry deadlines and lease metadata</li>
+        <li>Compact checkpoint markers</li>
+        <li>Short artifact references</li>
+      </ul>
+    </div>
+    <div class="card out">
+      <h2>OUTSIDE asmDB</h2>
+      <p>Files or object storage hold the payloads.</p>
+      <ul>
+        <li>Prompts and full chat history</li>
+        <li>Documents, source code and patches</li>
+        <li>Full tool outputs, logs and large results</li>
+        <li>Full execution snapshots</li>
+        <li>Embeddings and model weights</li>
+      </ul>
+    </div>
+  </section>
+
+  <div class="limits" aria-label="Existing asmDB limits">
+    <strong>Fixed 256-byte records</strong>
+    <span class="limit">tag: <strong>39 bytes max</strong></span>
+    <span class="limit">content: <strong>175 bytes max</strong></span>
+  </div>
+
+  <footer class="takeaway">
+    <h2>Rust runs the work. <span>asmDB remembers the state.</span></h2>
+    <p>Prove crash recovery locally. Add CDC wake-ups, then real intelligence.<br>A serialized queue is not a multi-row transaction or an exactly-once guarantee.</p>
+    <div class="roadmap" aria-label="Planned implementation sequence">
+      <div class="step"><b>01</b><span>Local state<br>+ one actor</span></div>
+      <div class="step"><b>02</b><span>Crash / restart<br>+ replay-safe work</span></div>
+      <div class="step"><b>03</b><span>CDC follower<br>+ reconciliation</span></div>
+      <div class="step"><b>04</b><span>Real LLM<br>+ adapters</span></div>
+      <div class="step"><b>LATER</b><span>asmdb.cloud<br>integration</span></div>
+    </div>
+    <p class="footnote">Design goals, not shipped features. No universal framework integration or performance claim is implied.</p>
+  </footer>
+</main>
+</body>
+</html>

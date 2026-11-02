@@ -1,0 +1,21 @@
+flowchart LR
+    DB[("asmDB commit")]
+    CDC[(".cdc file")]
+    V["Validate lineage, sequence,<br>length, CRC and trailer"]
+    S["Wake scheduler<br>then re-read durable state"]
+    A["State Actor<br>serialize next decision"]
+    R["Consistent snapshot + watermark<br>required after RESET or history gap"]
+    DB --> CDC
+    CDC -. "planned follower" .-> V
+    V -. "valid complete frame" .-> S
+    S -.-> A
+    A -. "existing MCP path" .-> DB
+    V -. "gap / RESET" .-> R
+    R -. "new cursor" .-> V
+    classDef existing fill:#332517,stroke:#ff961f,stroke-width:2px,color:#fff0d7
+    classDef future fill:#082a40,stroke:#20ddf4,stroke-dasharray:6 5,color:#f3f7fc
+    classDef warning fill:#3b1e2c,stroke:#fb8daa,stroke-dasharray:6 5,color:#ffe6ee
+    class DB,CDC existing
+    class V,S,A future
+    class R warning
+    linkStyle default stroke:#64889f,stroke-width:2px

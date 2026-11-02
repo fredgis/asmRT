@@ -1,0 +1,340 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { get } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { test } from 'node:test';
+import { createVisualizer } from '../server.mjs';
+
+const asmdbDir = process.env.ASMRT_ASMDB_REPO;
+
+async function fixture(t, options = {}) {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), 'asmrt-visual-test-'));
+  let server = await createVisualizer({ asmdbDir, dataRoot, port: 0, ...options });
+  t.after(async () => {
+    await server.close();
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+  const state = async () => {
+    const response = await fetch(`${server.url}/api/state`);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const post = async (action, body = {}) => {
+    const snapshot = await state();
+    return fetch(`${server.url}/api/${action}`, {
+      method: 'POST',
+      headers: { Origin: server.url, 'Content-Type': 'application/json', 'X-Asmrt-Token': snapshot.csrf_token },
+      body: JSON.stringify(body),
+    });
+  };
+  return {
+    server, dataRoot, state, post,
+    async restart() {
+      await server.close();
+      server = await createVisualizer({ asmdbDir, dataRoot, port: 0, ...options });
+    },
+  };
+}
+
+async function until(read, predicate, message) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const state = await read();
+    if (state.phase === 'error') assert.fail(state.error);
+    if (predicate(state)) return state;
+    await delay(50);
+  }
+  assert.fail(message);
+}
+
+test('one Play command times a real crash, rereads asmDB, recovers only unfinished work and verifies zero-work replay', { skip: !asmdbDir }, async t => {
+  const { state, post } = await fixture(t, { storySceneMs: 180 });
+  assert.equal((await post('play')).status, 202);
+  const scenes = new Map();
+  const pids = new Set();
+  const finished = await until(async () => {
+    const current = await state();
+    if (current.pid) pids.add(current.pid);
+    if (current.playback && !current.playback.transitioning) scenes.set(current.playback.scene.id, current);
+    return current;
+  }, s => s.playback?.status === 'finished', 'the one-click story did not finish');
+  assert.deepEqual([...scenes.keys()], ['queued', 'assigned', 'published', 'committed', 'crash-next', 'crashed', 'recovered', 'retrying', 'recovered-files', 'completed', 'verified']);
+  const queued = scenes.get('queued');
+  assert.equal(queued.database.response.rows.length, 8);
+  assert(queued.database.response.rows.every(row => row.tag === 'asmrt.v1.pending' && row.value === '0'));
+  assert.deepEqual(queued.database.commands, ['PAGE 1000 0', 'SELECT *']);
+  const published = scenes.get('published');
+  assert.equal(published.tasks.filter(task => task.published).length, 4);
+  assert.equal(published.database.response.rows.filter(row => row.tag === 'asmrt.v1.completed').length, 0);
+  const crashed = scenes.get('crashed');
+  assert.equal(crashed.phase, 'interrupted');
+  assert.equal(crashed.pid, null);
+  assert.equal(crashed.database.response.rows.filter(row => row.tag === 'asmrt.v1.running').length, 4);
+  const recovered = scenes.get('recovered');
+  assert.equal(recovered.database.response.rows.filter(row => row.tag === 'asmrt.v1.pending').length, 4);
+  assert.equal(recovered.database.response.rows.filter(row => row.tag === 'asmrt.v1.completed').length, 4);
+  assert.notEqual(recovered.database.launch_id, crashed.database.launch_id);
+  assert.match(scenes.get('retrying').playback.scene.description, /\b4 completed records\b/);
+  assert.match(scenes.get('recovered-files').playback.scene.description, /\b4 completed records\b/);
+  assert(pids.size >= 2, 'recovery must use a new real process');
+  const preserved = recovered.tasks.filter(task => task.state === 'completed').map(task => task.id);
+  assert(finished.tasks.filter(task => preserved.includes(task.id)).every(task => task.attempt === '1'));
+  assert(finished.tasks.filter(task => !preserved.includes(task.id)).every(task => task.attempt === '2'));
+  assert.equal(scenes.get('completed').summary.completed_now, 4);
+  assert.equal(finished.summary.completed_now, 0);
+  assert.equal(finished.summary.completed, 8);
+  assert.equal(finished.summary.retried, 4);
+  assert.equal(finished.run.id, queued.run.id);
+  assert.notEqual(finished.database.launch_id, recovered.database.launch_id);
+  assert(finished.database.response.rows.every(row => row.tag === 'asmrt.v1.completed'));
+});
+
+test('pausing freezes the cue, holds an in-flight operation at its next checkpoint, and old cues cannot affect a new run', { skip: !asmdbDir }, async t => {
+  const { state, post } = await fixture(t, { storySceneMs: 450 });
+  assert.equal((await post('play')).status, 202);
+  await until(state, s => s.phase === 'paused' && s.checkpoint.stage === 'ready', 'no initial checkpoint');
+  assert.equal((await post('pause')).status, 202);
+  const paused = await state();
+  await delay(750);
+  const reread = await state();
+  assert.equal(reread.playback.status, 'paused');
+  assert.equal(reread.playback.remaining_ms, paused.playback.remaining_ms);
+  assert.equal(reread.checkpoint.id, paused.checkpoint.id);
+  assert.deepEqual(reread.database, paused.database);
+  assert.equal(reread.pid, paused.pid, 'pause must not kill Rust');
+  assert.equal((await post('play')).status, 202);
+  const resumed = await state();
+  assert(resumed.playback.remaining_ms <= paused.playback.remaining_ms, 'resume must keep the remaining time');
+  await until(state, s => s.phase === 'running' && s.playback.scene.id === 'assigned', 'did not observe the actual file-writing operation');
+  assert.equal((await post('pause')).status, 202);
+  const published = await until(state, s => s.phase === 'paused' && s.checkpoint.stage === 'published', 'the current operation did not reach its safe checkpoint');
+  assert.equal(published.playback.status, 'paused');
+  assert.equal(published.tasks.filter(task => task.published).length, 4);
+  await delay(750);
+  assert.equal((await state()).checkpoint.id, published.checkpoint.id);
+  assert((await state()).tasks.every(task => task.state !== 'completed'));
+  assert.equal((await post('play')).status, 202);
+  const crashed = await until(state, s => s.playback.scene.id === 'crashed' && s.phase === 'interrupted', 'no automatic crash');
+  assert.equal((await post('run', { tasks: 4, work_ms: 1200 })).status, 202);
+  const independent = await until(state, s => s.phase === 'running', 'the independent run did not start');
+  assert.notEqual(independent.run.id, crashed.run.id);
+  assert.equal(independent.playback, null);
+  await delay(700);
+  const stillWorking = await state();
+  assert.equal(stillWorking.run.id, independent.run.id);
+  assert.equal(stillWorking.pid, independent.pid, 'the cancelled story must not reopen or kill a different runtime');
+  const finished = await until(state, s => s.phase === 'finished', 'independent work did not finish');
+  assert.equal(finished.summary.completed_now, 4);
+  assert.equal(finished.summary.retried, 0);
+});
+
+test('an early story restart reports the real completed count and reuses uncommitted files', { skip: !asmdbDir }, async t => {
+  const { state, post, restart } = await fixture(t, { storySceneMs: 450 });
+  assert.equal((await post('play')).status, 202);
+  const original = await until(state, s => s.phase === 'paused' && s.checkpoint.stage === 'published', 'no first published results');
+  assert.equal((await post('pause')).status, 202);
+  const files = await Promise.all(original.tasks.filter(task => task.published).map(async task => {
+    const filename = path.join(original.run.directory, 'artifacts', `${task.id}.json`);
+    return { filename, bytes: await readFile(filename), modified: (await stat(filename)).mtimeMs };
+  }));
+  assert.equal(files.length, 4);
+  assert(original.tasks.every(task => task.state !== 'completed'));
+  await restart();
+  assert.equal((await post('play')).status, 202);
+  const retrying = await until(state, s => s.phase === 'paused' && s.playback.scene.id === 'retrying', 'the early interruption did not recover');
+  assert.equal((await post('pause')).status, 202);
+  assert.equal(retrying.run.id, original.run.id);
+  assert.equal(retrying.database.response.rows.filter(row => row.tag === 'asmrt.v1.completed').length, 0);
+  assert.match(retrying.playback.scene.description, /\b0 completed records\b/);
+  assert.equal((await post('play')).status, 202);
+  const published = await until(state, s => s.phase === 'paused' && s.playback.scene.id === 'recovered-files', 'the interrupted results were not republished');
+  assert.equal((await post('pause')).status, 202);
+  assert.equal(published.tasks.filter(task => task.published).length, 4);
+  assert.match(published.playback.scene.description, /\b0 completed records\b/);
+  assert.doesNotMatch(published.playback.scene.title, /new files|four originals/i);
+  for (const file of files) {
+    assert.deepEqual(await readFile(file.filename), file.bytes);
+    assert.equal((await stat(file.filename)).mtimeMs, file.modified);
+  }
+});
+
+test('restarting a playing controller cancels its timer and waits for Play before reopening the saved database', { skip: !asmdbDir }, async t => {
+  const { state, post, restart } = await fixture(t, { storySceneMs: 450 });
+  assert.equal((await post('play')).status, 202);
+  const original = await until(state, s => s.phase === 'paused', 'no initial story checkpoint');
+  await restart();
+  await delay(750);
+  const stopped = await state();
+  assert.equal(stopped.run.id, original.run.id);
+  assert.equal(stopped.run.story, true);
+  assert.equal(stopped.phase, 'interrupted');
+  assert.equal(stopped.pid, null);
+  assert.equal(stopped.database, null, 'a restored configuration is not a fresh database read');
+  assert.equal(stopped.tasks.length, 0);
+  assert.equal(stopped.playback.status, 'paused');
+  assert.equal((await post('play')).status, 202);
+  const recovered = await until(state, s => s.phase === 'paused', 'Play did not reopen the saved run');
+  assert.equal((await post('pause')).status, 202);
+  assert.equal(recovered.run.id, original.run.id);
+  assert.notEqual(recovered.pid, original.pid);
+  assert.notEqual(recovered.checkpoint.id, original.checkpoint.id);
+  assert.equal(recovered.database.response.rows.length, 8);
+  assert.equal((await post('next', { checkpoint: original.checkpoint.id })).status, 409);
+});
+
+test('restarting the viewer retains its run and rereads durable state without replaying completed work', { skip: !asmdbDir }, async t => {
+  const { state, post, restart } = await fixture(t);
+  assert.equal((await post('run', { tasks: 4, work_ms: 0 })).status, 202);
+  const finished = await until(state, s => s.phase === 'finished', 'initial demo did not finish');
+  await restart();
+  const unloaded = await state();
+  assert.equal(unloaded.run.directory, finished.run.directory);
+  assert.equal(unloaded.phase, 'interrupted');
+  assert.equal(unloaded.tasks.length, 0, 'do not invent observations after controller restart');
+  assert.equal((await post('resume')).status, 202);
+  const resumed = await until(state, s => s.phase === 'finished', 'restored session did not finish');
+  assert.equal(resumed.summary.completed_now, 0);
+  assert.equal(resumed.summary.completed, 4);
+  assert.equal(resumed.run.id, finished.run.id);
+});
+
+test('foreign and malformed commands cannot launch a process or select a filesystem path', { skip: !asmdbDir }, async t => {
+  const { server, dataRoot, state, post } = await fixture(t);
+  const snapshot = await state();
+  for (const headers of [
+    { Origin: 'https://unrelated.example', 'X-Asmrt-Token': snapshot.csrf_token },
+    { Origin: server.url, 'X-Asmrt-Token': 'wrong-token' },
+  ]) {
+    const response = await fetch(`${server.url}/api/run`, {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tasks: 4, work_ms: 0 }),
+    });
+    assert.equal(response.status, 403);
+  }
+  const rejectedHost = await new Promise((resolve, reject) => {
+    get(`${server.url}/api/state`, { headers: { Host: 'unrelated.example' } }, response => {
+      response.resume();
+      resolve(response.statusCode);
+    }).on('error', reject);
+  });
+  assert.equal(rejectedHost, 403);
+  assert.equal((await post('run', { tasks: 4, work_ms: 0, data_dir: dataRoot })).status, 400);
+  assert.equal((await post('run', { tasks: 101, work_ms: 0 })).status, 400);
+  assert.equal((await post('resume')).status, 409);
+  assert.equal((await state()).phase, 'idle');
+  assert.equal((await state()).run, null);
+  assert.equal((await state()).pid, null);
+});
+
+test('interrupting the owned process preserves completed work and resumes interrupted attempts', { skip: !asmdbDir }, async t => {
+  const { state, post } = await fixture(t);
+  assert.equal((await post('run', { tasks: 16, work_ms: 400 })).status, 202);
+  const working = await until(state, s => s.tasks.some(task => task.state === 'completed') && s.tasks.some(task => task.state === 'running'), 'no concurrent work observed');
+  const completed = working.tasks.find(task => task.state === 'completed');
+  const filename = path.join(working.run.directory, 'artifacts', `${completed.id}.json`);
+  const before = await readFile(filename);
+  const modified = (await stat(filename)).mtimeMs;
+  assert.equal((await post('run', { tasks: 4, work_ms: 0 })).status, 409);
+  assert.equal((await post('interrupt')).status, 202);
+  const stopped = await state();
+  assert.equal(stopped.phase, 'interrupted');
+  assert.equal(stopped.pid, null);
+  assert.equal((await post('resume')).status, 202);
+  const finished = await until(state, s => s.phase === 'finished', 'interrupted work did not recover');
+  assert.equal(finished.summary.completed, 16);
+  assert(finished.summary.retried > 0);
+  assert(finished.summary.completed_now < 16);
+  assert.equal(finished.tasks.find(task => task.id === completed.id).attempt, completed.attempt);
+  assert.deepEqual(await readFile(filename), before);
+  assert.equal((await stat(filename)).mtimeMs, modified);
+});
+
+test('guided steps wait for the reader, reject stale clicks, and recover only unfinished files after a controller restart', { skip: !asmdbDir }, async t => {
+  const { server, state, post, restart } = await fixture(t);
+  assert.equal((await post('run', { tasks: 8, work_ms: 0, guided: true })).status, 202);
+  let current = await until(state, s => s.phase === 'paused', 'the guided demo did not pause');
+  assert.equal(current.checkpoint.stage, 'ready');
+  assert(current.tasks.every(task => task.state === 'pending' && task.attempt === '0'));
+  const initialCheckpoint = current.checkpoint.id;
+  await delay(600);
+  assert.deepEqual((await state()).tasks, current.tasks, 'no autonomous work while the reader pauses');
+  assert.equal((await state()).checkpoint.id, initialCheckpoint);
+  assert.equal((await post('run', { tasks: 4, work_ms: 0 })).status, 409);
+  const advance = async expected => {
+    const checkpoint = current.checkpoint.id;
+    assert.equal((await post('next', { checkpoint })).status, 202);
+    current = await until(state, s => s.phase === 'finished' || (s.phase === 'paused' && s.checkpoint.id !== checkpoint), 'next checkpoint was not reached');
+    assert.equal(current.checkpoint?.stage ?? current.phase, expected);
+  };
+  await advance('claimed');
+  assert.equal(current.tasks.filter(task => task.state === 'running').length, 4);
+  assert(current.tasks.every(task => !task.published));
+  assert.equal((await post('next', { checkpoint: initialCheckpoint })).status, 409, 'a repeated click cannot skip the current explanation');
+  assert.equal((await fetch(`${server.url}/api/artifacts/1`)).status, 404);
+  await advance('published');
+  assert.equal(current.tasks.filter(task => task.published).length, 4);
+  assert.equal(current.tasks.filter(task => task.state === 'completed').length, 0, 'a published file is not yet a completed task');
+  assert.equal((await fetch(`${server.url}/api/artifacts/1`)).status, 200);
+  await delay(600);
+  assert.equal((await state()).checkpoint.id, current.checkpoint.id);
+  await advance('completed');
+  assert.equal(current.tasks.filter(task => task.state === 'completed').length, 4);
+  const completed = current.tasks.filter(task => task.state === 'completed');
+  const file = path.join(current.run.directory, 'artifacts', `${completed[0].id}.json`);
+  const before = await readFile(file);
+  const modified = (await stat(file)).mtimeMs;
+  await advance('claimed');
+  assert.equal(current.tasks.filter(task => task.state === 'running').length, 4);
+  const oldCheckpoint = current.checkpoint.id;
+  assert.equal((await post('interrupt')).status, 202);
+  assert.equal((await state()).pid, null);
+  assert.equal((await state()).checkpoint, null);
+  await restart();
+  const unloaded = await state();
+  assert.equal(unloaded.run.guided, true);
+  assert.equal(unloaded.tasks.length, 0);
+  assert.equal((await post('resume')).status, 202);
+  current = await until(state, s => s.phase === 'paused', 'recovered state did not pause');
+  assert.equal(current.checkpoint.stage, 'ready');
+  assert.equal(current.tasks.filter(task => task.state === 'completed').length, 4);
+  assert.equal(current.tasks.filter(task => task.state === 'pending').length, 4);
+  assert.equal((await post('next', { checkpoint: oldCheckpoint })).status, 409);
+  await advance('claimed');
+  assert(current.tasks.filter(task => task.state === 'running').every(task => task.attempt === '2'));
+  await advance('published');
+  await advance('finished');
+  assert.equal(current.summary.completed, 8);
+  assert.equal(current.summary.completed_now, 4);
+  assert.equal(current.summary.retried, 4);
+  assert(current.tasks.filter(task => completed.some(old => old.id === task.id)).every(task => task.attempt === '1'));
+  assert.deepEqual(await readFile(file), before);
+  assert.equal((await stat(file)).mtimeMs, modified);
+  assert.equal((await post('resume')).status, 202);
+  const replay = await until(state, s => s.phase === 'finished' && s.summary?.completed_now === 0, 'guided replay waited for input or repeated work');
+  assert.equal(replay.checkpoint, null);
+  assert.equal(replay.summary.completed, 8);
+});
+
+test('HTTP view follows real task acknowledgements, serves results, and replays without work', { skip: !asmdbDir }, async t => {
+  const { server, state, post } = await fixture(t);
+  assert.equal((await state()).phase, 'idle');
+  assert.equal((await post('run', { tasks: 8, work_ms: 40 })).status, 202);
+  const finished = await until(state, s => s.phase === 'finished', 'demo did not finish');
+  assert.equal(finished.summary.completed_now, 8);
+  assert.equal(finished.tasks.length, 8);
+  assert(finished.tasks.every(task => task.state === 'completed' && task.attempt === '1'));
+  assert.equal(finished.events.filter(event => event.event === 'task_claimed').length, 8);
+  const artifact = await fetch(`${server.url}/api/artifacts/1`);
+  assert.equal(artifact.status, 200);
+  assert.deepEqual(await artifact.json(), { schema: 'asmrt.demo.v1', task_id: '1', result: 'deterministic completion' });
+  const file = path.join(finished.run.directory, 'artifacts', '1.json');
+  const original = await stat(file);
+  const lastSequence = finished.events.at(-1).sequence;
+  assert.equal((await post('resume')).status, 202);
+  const repeated = await until(state, s => s.phase === 'finished' && s.summary?.completed_now === 0, 'replay did not finish');
+  assert.equal(repeated.summary.completed, 8);
+  assert.equal(repeated.events.filter(event => event.sequence > lastSequence && event.event === 'task_claimed').length, 0);
+  assert.equal((await stat(file)).mtimeMs, original.mtimeMs);
+});
