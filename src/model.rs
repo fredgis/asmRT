@@ -1,3 +1,5 @@
+//! Task states, definition references, and the compact versioned asmDB record codec.
+
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -17,6 +19,7 @@ pub enum TaskState {
     Completed,
 }
 
+// Definitions stay external; rows retain only a short reference and a SHA-256 digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DefinitionRef {
     reference: String,
@@ -88,6 +91,7 @@ impl Task {
         self.definition.as_ref()
     }
 
+    // Transitions build candidate values only; the actor owns persistence and stale-claim checks.
     pub(crate) fn claimed(&self, owner: &str) -> Result<Self> {
         validate_owner(owner)?;
         let mut task = self.clone();
@@ -138,6 +142,7 @@ impl Task {
         self.artifact.as_deref()
     }
 
+    // Decimal strings preserve integer precision; only definition-bearing tasks use v2.
     pub fn encode(&self) -> Result<Record> {
         self.validate()?;
         let version = if self.definition.is_some() { 2 } else { 1 };
@@ -211,6 +216,7 @@ impl Task {
                 ));
             }
         }
+        // A retried pending task keeps its attempt count, but loses ownership and its artifact.
         let valid = match self.state {
             TaskState::Pending => self.owner.is_none() && self.artifact.is_none(),
             TaskState::Running => {
@@ -229,6 +235,7 @@ impl Task {
     }
 }
 
+// Short field names share asmDB's 175-byte content budget, including JSON escaping.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Payload {

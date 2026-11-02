@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- Native controls and complementary overview/details views of real, persisted agent conversations. -->
 <html lang="en" data-detail="overview" data-presentation="overview">
   <head>
     <meta charset="utf-8">
@@ -33,6 +34,7 @@
       </header>
 
       <main id="main" tabindex="-1">
+        <!-- Demo selection affects only the next explicit start; reset preserves saved run folders. -->
         <section class="mission" aria-label="Conversation mission">
           <form id="conversation-form" class="conversation-form" novalidate>
             <div class="overview-mission overview-only"><h2 id="overview-title">Can they save pizza night?</h2><p id="overview-topic">Eight friends. $40. One oven.</p></div>
@@ -42,6 +44,20 @@
               <p id="conversation-topic-help" class="section-help">Eight short replies. A broken oven. A real process crash.</p>
               <p id="conversation-topic-error" class="field-error" role="alert" hidden></p>
             </div>
+            <fieldset id="workflow-picker" class="workflow-picker" aria-describedby="workflow-help" disabled>
+              <legend id="workflow-legend">Demo for next run</legend>
+              <div class="workflow-options">
+                <label class="workflow-option">
+                  <input type="radio" name="workflow" value="conversation.sequential" checked>
+                  <span class="workflow-card"><span class="workflow-heading"><strong>1 · Relay</strong><svg class="workflow-mini" viewBox="0 0 64 32" width="48" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="6" cy="16" r="3"/><circle cx="23" cy="16" r="3"/><circle cx="41" cy="16" r="3"/><circle cx="58" cy="16" r="3"/><path d="M10 16h9m-3-3 3 3-3 3M27 16h10m-3-3 3 3-3 3M45 16h9m-3-3 3 3-3 3"/></svg></span><span id="workflow-sequential-note" class="workflow-caption">One role at a time.</span></span>
+                </label>
+                <label class="workflow-option">
+                  <input type="radio" name="workflow" value="conversation.discussion">
+                  <span class="workflow-card"><span class="workflow-heading"><strong>2 · Discussion</strong><svg class="workflow-mini" viewBox="0 0 64 32" width="48" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="6" cy="16" r="3"/><circle cx="31" cy="5" r="3"/><circle cx="31" cy="16" r="3"/><circle cx="31" cy="27" r="3"/><circle cx="58" cy="16" r="3"/><path d="M9 16h9V5h9m-9 11h9m-9 0v11h9M35 5h10v22H35M35 16h20m-3-3 3 3-3 3"/></svg></span><span id="workflow-discussion-note" class="workflow-caption">Debate, then synthesize.</span></span>
+                </label>
+              </div>
+              <p id="workflow-help" class="section-help">Choose a demo, then Start. Same local model.</p>
+            </fieldset>
             <div class="conversation-transport">
               <div class="conversation-actions">
                 <button id="start-conversation" class="button button-primary" type="submit" aria-describedby="conversation-control-note" disabled><span id="conversation-icon" aria-hidden="true">▶</span><span id="conversation-button-label">Start conversation</span></button>
@@ -52,10 +68,16 @@
             </div>
           </form>
         </section>
+        <!-- Full chronological replies retain stable nodes while independent branches publish their results. -->
         <section id="overview-stage" class="overview-stage" aria-label="A conversation that survives a restart">
           <section class="team-scene" aria-labelledby="team-title">
             <header class="scene-heading"><h2 id="team-title"><span class="scene-wordmark">asm<b>RT</b></span><span class="scene-caption">The team</span></h2><p id="overview-status" class="overview-status" role="status" aria-live="polite">Ready when you are.</p></header>
-            <ol id="overview-agents" class="overview-agents" aria-label="Workflow 1: Planner, Builder, Critic, then Editor. One agent at a time.">
+            <div class="workflow-topology">
+              <svg id="overview-workflow-chain" viewBox="0 0 64 32" width="64" height="32" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="6" cy="16" r="3"/><circle cx="23" cy="16" r="3"/><circle cx="41" cy="16" r="3"/><circle cx="58" cy="16" r="3"/><path d="M10 16h9m-3-3 3 3-3 3M27 16h10m-3-3 3 3-3 3M45 16h9m-3-3 3 3-3 3"/></svg>
+              <svg id="overview-workflow-discussion" viewBox="0 0 64 32" width="64" height="32" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false" hidden><circle cx="6" cy="16" r="3"/><circle cx="31" cy="5" r="3"/><circle cx="31" cy="16" r="3"/><circle cx="31" cy="27" r="3"/><circle cx="58" cy="16" r="3"/><path d="M9 16h9V5h9m-9 11h9m-9 0v11h9M35 5h10v22H35M35 16h20m-3-3 3 3-3 3"/></svg>
+              <p><strong id="overview-workflow-title">Relay · next run</strong><span id="overview-workflow-description">Planner → Builder → Critic → Editor · 2 rounds, one role at a time.</span></p>
+            </div>
+            <ol id="overview-agents" class="overview-agents" data-workflow="conversation.sequential" aria-label="Workflow 1: Planner, Builder, Critic, then Editor. One agent at a time.">
               <li class="overview-agent" data-agent-id="planner" data-worker-slot="0"><div class="worker-portrait" role="img" aria-label="Cyan Planner robot"></div><h3>Planner</h3><p class="overview-agent-status"></p></li>
               <li class="overview-agent" data-agent-id="builder" data-worker-slot="1"><div class="worker-portrait" role="img" aria-label="Mint Builder robot"></div><h3>Builder</h3><p class="overview-agent-status"></p></li>
               <li class="overview-agent" data-agent-id="critic" data-worker-slot="2"><div class="worker-portrait" role="img" aria-label="Orange Critic robot"></div><h3>Critic</h3><p class="overview-agent-status"></p></li>
@@ -82,6 +104,7 @@
           </section>
           <ol id="overview-journey" class="overview-journey" aria-label="Automatic recovery sequence"><li data-chat-chapter="0"><span aria-hidden="true">1</span>Talk</li><li data-chat-chapter="1"><span aria-hidden="true">2</span>Crash</li><li data-chat-chapter="2"><span aria-hidden="true">3</span>Recover</li><li data-chat-chapter="3"><span aria-hidden="true">4</span>Verify</li></ol>
         </section>
+        <!-- Details keeps runtime activity, dependency references and native database observations separate. -->
         <div id="live-stage" class="live-stage" data-focus="">
           <section class="runtime-panel" aria-labelledby="runtime-title">
             <div class="pane-heading"><h2 id="runtime-title"><span>asmRT</span> <span id="runtime-subtitle">Agents &amp; execution</span></h2><span id="conversation-runtime" class="process-status" data-tone="neutral">Not started</span></div>
@@ -200,7 +223,7 @@
 
     <dialog id="reset-dialog" class="artifact-dialog reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
       <h2 id="reset-title">Start fresh?</h2>
-      <p id="reset-description">Playback and this runtime will stop. Your saved conversations stay on disk. Nothing starts until you press Start conversation again.</p>
+      <p id="reset-description">Playback and this runtime will stop. Your saved conversations stay on disk. Choose a demo afterward; nothing starts until you press Start conversation again.</p>
       <div class="reset-actions"><button id="cancel-reset" class="button" type="button" autofocus>Cancel</button><button id="confirm-reset" class="button button-primary" type="button">Reset demo</button></div>
     </dialog>
 

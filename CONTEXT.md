@@ -19,11 +19,25 @@ _Avoid_: Model instance, worker process.
 A conversation in which one role speaks at a time, using all earlier committed replies as context. Rust sequences Planner → Builder → Critic → Editor for the saved number of rounds; one shared model receives at most one call at a time. See the [workflow contract](Docs/WORKFLOWS.md).
 _Avoid_: Peer-to-peer message bus, last-message relay, general parallel-workflow engine.
 
+**Workflow 2: discussion** (`conversation.discussion`, version `1`):
+Planner proposes an idea. Builder, Critic and Editor debate in concurrent waves, each using the same prior committed history. Editor then synthesizes a final decision.
+_Avoid_: Sequential relay, unlimited autonomous discussion, arbitrary DAG engine.
+
+**Stateful agent**:
+A role whose saved instructions, task progress and replies survive a process restart through asmRT, asmDB and immutable files. The LLM remains stateless; asmRT reconstructs its request context.
+_Avoid_: Permanent model memory, unlimited context.
+
 **Turn**:
-One role's contribution at a specified position in a conversation.
+One role's contribution represented by a durable task; turns in a discussion wave can execute concurrently.
 
 **Round**:
-One ordered pass through Planner, Builder, Critic, and Editor.
+In Workflow 1, one ordered pass through all four roles. In Workflow 2, one three-role debate wave after Planner's opening idea.
+
+**Debate wave / fan-in**:
+Three concurrent sibling jobs over the same committed input set. The next wave or final synthesis waits for all required completions.
+
+**Committed input set**:
+The saved, ordered dependency IDs whose verified replies form a job's context. Sibling replies from the current wave are excluded.
 
 **Published reply**:
 A produced contribution that is available but not necessarily committed.
@@ -32,7 +46,7 @@ A produced contribution that is available but not necessarily committed.
 A reply accepted as completed work in the conversation's authoritative history.
 
 **Committed prefix**:
-The uninterrupted sequence of committed replies preceding the next unfinished turn.
+Workflow 1's uninterrupted sequence of committed replies preceding the next unfinished turn.
 
 **Overview / Details**:
 Two presentations of the same run: graphical conversation and memory, or professional runtime/database inspection. Switching views does not advance the workflow.

@@ -1,17 +1,47 @@
+// Defines the two bounded conversation contracts and maps real runtime checkpoints to demo scenes.
+// Story pacing observes execution; it never fabricates replies or decides task dependencies.
 export const DEFAULT_TOPIC = 'Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.';
+export const SEQUENTIAL = 'conversation.sequential';
+export const DISCUSSION = 'conversation.discussion';
 
+// Normalize only new-run settings; saved plans keep their original workflow and prompts.
 export function conversationOptions(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options)
-      || Object.keys(options).some(key => !['topic', 'rounds'].includes(key))) {
-    throw new Error('A conversation accepts a topic and an optional number of rounds.');
+      || Object.keys(options).some(key => !['topic', 'rounds', 'workflow'].includes(key))) {
+    throw new Error('A conversation accepts a topic, rounds and a workflow.');
   }
   const topic = options.topic ?? DEFAULT_TOPIC;
   const rounds = options.rounds ?? 2;
+  const workflow = options.workflow === undefined ? SEQUENTIAL : options.workflow;
   if (typeof topic !== 'string' || !topic.trim() || topic.includes('\0') || [...topic.trim()].length > 400
       || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
     throw new Error('Choose a topic of 1 to 400 characters and 1 to 3 rounds.');
   }
-  return { topic: topic.trim(), rounds };
+  if (![SEQUENTIAL, DISCUSSION].includes(workflow)) throw new Error('Choose the sequential or discussion workflow.');
+  return { topic: topic.trim(), rounds, workflow };
+}
+
+// The observer validates this fixed topology against Rust's saved job dependencies.
+export function conversationTurns({ workflow = SEQUENTIAL, rounds = 2 }) {
+  if (![SEQUENTIAL, DISCUSSION].includes(workflow) || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
+    throw new Error('Unsupported conversation topology.');
+  }
+  const turns = [];
+  const prior = () => turns.map(turn => turn.task_id);
+  const add = (agent_id, input_ids) => turns.push({ task_id: String(turns.length + 1), agent_id, input_ids: [...input_ids] });
+  if (workflow === SEQUENTIAL) {
+    for (let round = 0; round < rounds; round++) {
+      for (const agent of ['planner', 'builder', 'critic', 'editor']) add(agent, prior());
+    }
+  } else {
+    add('planner', []);
+    for (let round = 0; round < rounds; round++) {
+      const inputs = prior();
+      for (const agent of ['builder', 'critic', 'editor']) add(agent, inputs);
+    }
+    add('editor', prior());
+  }
+  return turns;
 }
 
 export function localModelSettings(model, endpoint) {
@@ -24,7 +54,9 @@ export function localModelSettings(model, endpoint) {
   return { model, ollama_url: url.origin };
 }
 
+// Sequential scenes retain the original single-turn crash/recovery demonstration.
 export function describeConversation({ phase, checkpoint, tasks, summary, conversation, run }) {
+  if (run.workflow === DISCUSSION) return describeDiscussion({ phase, checkpoint, tasks, summary, conversation, run });
   const completed = tasks.filter(task => task.state === 'completed').length;
   const total = run.tasks * 3 + 5;
   const pizza = conversation?.topic === DEFAULT_TOPIC;
@@ -93,5 +125,69 @@ export function describeConversation({ phase, checkpoint, tasks, summary, conver
   if (checkpoint.stage === 'completed') return scene('committed', `${name}'s reply is committed.`,
     'asmDB has its hash. The next agent can use this reply.',
     'Pass to the next agent', 'next', 1100, number * 3, 'database');
+  return null;
+}
+
+// Discussion cues stop at whole-wave barriers, never between the three sibling requests.
+function describeDiscussion({ phase, checkpoint, tasks, summary, conversation, run }) {
+  const completed = tasks.filter(task => task.state === 'completed').length;
+  const total = (run.rounds + 2) * 3 + 5;
+  const wave = id => Number(id) === 1 ? 0 : Number(id) === run.tasks ? run.rounds + 1 : Math.floor((Number(id) - 2) / 3) + 1;
+  const scene = (id, title, description, next_label, action, duration_ms, index, focus = 'conversation') => ({
+    scene: { id: `chat-${id}`, chapter: 'Discussion', title, description, next_label, focus },
+    action, duration_ms, index, total,
+  });
+  if (phase === 'finished') {
+    return summary?.completed_now === 0 && summary?.model_calls_now === 0
+      ? scene('verified', 'Same decision. Zero new model calls.', `${completed} replies verified from disk.`,
+        'Start another discussion', null, 0, total - 1)
+      : scene('completed', 'The team has a decision.', 'Every reply is committed. One restart proves they survive.',
+        'Restart and verify', 'resume', 4500, total - 2);
+  }
+  if (phase === 'interrupted') {
+    return conversation
+      ? scene('crashed', 'Rust stopped. The debate survives.', `${completed} committed replies are still here.`,
+        'Reopen the discussion', 'resume', 6500, Math.min(total - 3, completed + 2), 'database')
+      : scene('reopen', 'Reopen the saved discussion.', 'Read its jobs and replies before continuing.',
+        'Read saved work', 'resume', 2500, 0, 'database');
+  }
+  const generating = (conversation?.active_turns ?? []).filter(turn => turn.stage === 'generating');
+  if (phase === 'running' && generating.length) {
+    const index = wave(generating[0].task_id);
+    const title = index === 0 ? 'Planner is pitching an idea.' : index === run.rounds + 1 ? 'Editor is writing the decision.' : 'The team is debating.';
+    return scene('generating', title, `${generating.length} model request${generating.length === 1 ? '' : 's'} in flight. ${generating[0].input_ids.length} committed replies in context.`,
+      'Waiting for Ollama', null, 0, index * 3 + 1);
+  }
+  if (phase !== 'paused' || !checkpoint) return null;
+  if (checkpoint.stage === 'ready') {
+    return tasks.some(task => Number(task.attempt) > 0)
+      ? scene('recovered', 'Same debate. Only unfinished work resumes.', `${completed} replies verified. Completed branches stay untouched.`,
+        'Continue the discussion', 'next', 4500, Math.min(total - 3, completed), 'database')
+      : scene('ready', 'One idea. Three challengers.', 'Planner opens. Three peers debate. Editor brings it together.',
+        'Give Planner the floor', 'next', 4500, 0);
+  }
+  const batch = checkpoint.task_ids.map(id => tasks.find(task => task.id === id)).filter(Boolean);
+  if (!batch.length) return null;
+  const index = wave(batch[0].id);
+  const final = index === run.rounds + 1;
+  if (checkpoint.stage === 'claimed') {
+    const crashId = run.rounds > 1 ? '5' : '2';
+    if (batch.some(task => task.id === crashId && task.attempt === '1')) {
+      return scene('crash-next', 'Three jobs claimed. Now kill Rust.', 'The next debate round has not called the model yet.',
+        'Stop the Rust process', 'interrupt', 5000, index * 3 + 1, 'database');
+    }
+    return scene('assigned', index === 0 ? 'Planner, pitch an idea.' : final ? 'Editor, bring it together.' : `Debate round ${index}.`,
+      index === 0 ? 'A concrete starting point, not the final answer.' : final ? 'Read the full debate. Make one concrete decision.' : 'Builder, Critic and Editor get the same context. They reply in parallel.',
+      final ? 'Write the decision' : index === 0 ? 'Ask Planner' : 'Open the debate', 'next', 1100, index * 3 + 1);
+  }
+  if (checkpoint.stage === 'published') {
+    const messages = (conversation?.messages ?? []).filter(message => checkpoint.task_ids.includes(message.task_id));
+    const words = messages.reduce((count, message) => count + message.text.trim().split(/\s+/).length, 0);
+    return scene('saved', final ? 'The decision is saved.' : index === 0 ? 'The idea is saved.' : 'Three views, saved side by side.',
+      messages.every(message => message.reused) ? 'Saved replies reused. No new model calls.' : 'Real replies on disk. Commit their hashes in asmDB next.',
+      'Commit the replies', 'next', Math.max(6500, Math.min(14000, words * 160)), index * 3 + 2);
+  }
+  if (checkpoint.stage === 'completed') return scene('committed', index === 0 ? 'The idea is committed.' : `Debate round ${index} is committed.`,
+    'The next wave can now use every reply from this round.', 'Continue the discussion', 'next', 1100, (index + 1) * 3, 'database');
   return null;
 }

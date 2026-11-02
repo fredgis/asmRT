@@ -1,3 +1,5 @@
+// Owns the local demo's Rust process, validates its events and exposes the browser control interface.
+// All durable state comes from asmDB acknowledgements and immutable job/reply files, not the UI.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -6,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { describeStory } from './story.mjs';
-import { conversationOptions, describeConversation, localModelSettings } from './conversation-story.mjs';
+import { conversationOptions, conversationTurns, describeConversation, localModelSettings, DISCUSSION, SEQUENTIAL } from './conversation-story.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = path.join(root, 'visualizer', 'public');
@@ -146,8 +148,8 @@ export async function createVisualizer({
     if (saved.kind !== undefined && !['demo', 'conversation'].includes(saved.kind)) throw new Error('Unsupported saved run kind.');
     let chatSettings = {};
     if (saved.kind === 'conversation') {
-      chatSettings = { ...conversationOptions({ topic: saved.topic, rounds: saved.rounds }), ...localModelSettings(saved.model, saved.ollama_url) };
-      if (saved.tasks !== chatSettings.rounds * 4 || !saved.guided || saved.story || saved.topic !== chatSettings.topic) throw new Error('Invalid saved conversation configuration.');
+      chatSettings = { ...conversationOptions({ topic: saved.topic, rounds: saved.rounds, workflow: saved.workflow }), ...localModelSettings(saved.model, saved.ollama_url) };
+      if (saved.tasks !== conversationTurns(chatSettings).length || !saved.guided || saved.story || saved.topic !== chatSettings.topic) throw new Error('Invalid saved conversation configuration.');
     }
     run = { id: saved.id, directory: path.join(dataRoot, saved.id), tasks: saved.tasks, workers: 4, work_ms: saved.work_ms,
       guided: saved.guided ?? false, story: saved.story ?? false, kind: saved.kind ?? 'demo', ...chatSettings };
@@ -166,6 +168,12 @@ export async function createVisualizer({
     source: { engine, bridge, mode: 'Acknowledged CLI events and real SELECT * reads through the same MCP connection; not CDC or an engine heartbeat.' },
   });
 
+  // Each active turn keeps its own saved dependency set; completion order does not change context.
+  function synchronizeActive() {
+    conversation.active_turns.sort((left, right) => Number(left.task_id) - Number(right.task_id));
+    conversation.active = conversation.active_turns[0] ?? null;
+  }
+
   function consume(event) {
     if (event.event === 'ready') {
       if (!Array.isArray(event.task_snapshot) || event.task_snapshot.length !== run.tasks) {
@@ -177,16 +185,30 @@ export async function createVisualizer({
       }
       if (run.kind === 'conversation') {
         const restored = event.conversation;
-        const done = [...tasks.values()].filter(task => task.state === 'completed');
+        const planned = conversationTurns(run);
+        const done = new Set([...tasks.values()].filter(task => task.state === 'completed').map(task => task.id));
+        const workflow = restored?.workflow ?? { kind: SEQUENTIAL, version: 1 };
+        const matchesTurn = (turn, expected) => turn?.task_id === expected?.task_id && turn?.agent_id === expected?.agent_id
+          && JSON.stringify(turn?.input_ids) === JSON.stringify(expected?.input_ids);
         if (restored?.schema !== 'asmrt.conversation.v1' || restored.topic !== run.topic
             || restored.model?.name !== run.model || restored.turns_total !== run.tasks
+            || workflow.kind !== run.workflow || workflow.version !== 1
             || !Array.isArray(restored.agents) || restored.agents.length !== 4
-            || !Array.isArray(restored.messages) || restored.messages.length !== done.length
-            || restored.messages.some((message, index) => message.task_id !== String(index + 1)
-              || tasks.get(message.task_id)?.state !== 'completed' || message.committed !== true)) {
+            || (restored.turns === undefined ? run.workflow !== SEQUENTIAL
+              : !Array.isArray(restored.turns) || restored.turns.length !== planned.length
+                || restored.turns.some((turn, index) => !matchesTurn(turn, planned[index])))
+            || !Array.isArray(restored.messages) || restored.messages.length !== done.size
+            || new Set(restored.messages.map(message => message.task_id)).size !== done.size
+            || restored.messages.some(message => {
+              const turn = planned.find(turn => turn.task_id === message.task_id);
+              return !turn || !done.has(message.task_id) || message.committed !== true
+                || !matchesTurn(message, turn) || turn.input_ids.some(id => !done.has(id));
+            })) {
           throw new Error('The saved conversation does not match the acknowledged tasks.');
         }
-        conversation = { ...restored, active: null };
+        conversation = { ...restored, workflow, turns: planned,
+          messages: [...restored.messages].sort((left, right) => Number(left.task_id) - Number(right.task_id)),
+          active_turns: [], active: null };
       }
       if (phase !== 'stopping') phase = 'running';
       append({ event: 'ready', message: 'State reloaded from asmDB. Interrupted assignments are pending again.' });
@@ -195,38 +217,47 @@ export async function createVisualizer({
       tasks.set(event.task_id, { ...event.task, published: event.task.state === 'completed' });
       if (conversation) {
         if (event.event === 'task_claimed') {
-          conversation.active = { task_id: event.task_id, agent_id: event.task.owner, stage: 'assigned',
-            input_ids: conversation.messages.filter(message => message.committed).map(message => message.task_id) };
+          const turn = conversation.turns.find(turn => turn.task_id === event.task_id);
+          if (!turn || turn.agent_id !== event.task.owner
+              || conversation.active_turns.some(active => active.task_id === event.task_id)
+              || turn.input_ids.some(id => !conversation.messages.some(message => message.task_id === id && message.committed))) {
+            throw new Error('Claimed conversation job has an invalid role or unfinished dependencies.');
+          }
+          conversation.active_turns.push({ ...turn, stage: 'assigned' });
         } else {
           const message = conversation.messages.find(message => message.task_id === event.task_id);
           if (!message) throw new Error('Conversation completion without an observed reply.');
           message.committed = true;
-          conversation.active = null;
+          conversation.active_turns = conversation.active_turns.filter(active => active.task_id !== event.task_id);
         }
+        synchronizeActive();
       }
       append(event);
     } else if (event.event === 'inference_started') {
-      if (!conversation || conversation.active?.task_id !== event.task_id
-          || conversation.active.agent_id !== event.agent_id
-          || JSON.stringify(event.input_ids) !== JSON.stringify(conversation.active.input_ids)) {
+      const active = conversation?.active_turns.find(turn => turn.task_id === event.task_id);
+      if (!active || active.agent_id !== event.agent_id || active.stage !== 'assigned'
+          || JSON.stringify(event.input_ids) !== JSON.stringify(active.input_ids)) {
         throw new Error('Inference does not match the current agent and saved messages.');
       }
-      conversation.active.stage = 'generating';
+      active.stage = 'generating';
       append({ event: event.event, task_id: event.task_id, owner: event.agent_id, message: 'A real local Ollama request is running.' });
       synchronizePlayback();
     } else if (event.event === 'message_published') {
       const message = event.message;
       const task = tasks.get(message?.task_id);
-      if (!conversation || !task?.published || task.owner !== message.agent_id
+      const active = conversation?.active_turns.find(turn => turn.task_id === message?.task_id);
+      if (!active || !task?.published || task.owner !== message.agent_id
           || task.definition?.sha256 !== message.job_sha256 || typeof message.text !== 'string' || !message.text.trim()
-          || JSON.stringify(message.input_ids) !== JSON.stringify(conversation.active?.input_ids)
+          || JSON.stringify(message.input_ids) !== JSON.stringify(active.input_ids)
           || conversation.messages.some(existing => existing.task_id === message.task_id)) {
         throw new Error('Published reply does not match its task definition and conversation inputs.');
       }
       conversation.messages.push({ ...message, committed: false, reused: event.reused === true });
-      conversation.active.stage = 'saved';
+      conversation.messages.sort((left, right) => Number(left.task_id) - Number(right.task_id));
+      active.stage = 'saved';
       append({ event: event.event, task_id: message.task_id, owner: message.agent_id,
         message: event.reused ? 'Existing reply reused without a model call.' : 'The generated reply was saved; its completion is not committed yet.' });
+      synchronizePlayback();
     } else if (event.event === 'artifact_published') {
       const task = tasks.get(event.task_id);
       if (!task) throw new Error('Artifact event without a task.');
@@ -273,14 +304,16 @@ export async function createVisualizer({
     cueGeneration++;
   }
 
-  function preparePlayback(status, kind = run?.kind) {
+  // Timers advance only acknowledged checkpoints and are invalidated across runs and resets.
+  function preparePlayback(status, kind = run?.kind, settings = run) {
     cancelCue();
     cueRemaining = 0;
     cueAction = null;
     sceneKey = null;
     const chat = kind === 'conversation';
     playback = {
-      status, index: 0, total: chat ? 29 : 11, duration_ms: 0, transitioning: true,
+      status, index: 0, total: chat ? (settings?.workflow === DISCUSSION ? ((settings.rounds ?? 2) + 2) * 3 + 5 : (settings?.rounds ?? 2) * 12 + 5) : 11,
+      duration_ms: 0, transitioning: true,
       scene: { id: chat ? 'chat-opening' : 'queued', chapter: chat ? 'Conversation' : 'Queue',
         title: chat ? 'Opening the saved conversation.' : 'Opening asmDB.',
         description: chat ? 'Reading the local model identity, task definitions and real asmDB records.'
@@ -308,7 +341,8 @@ export async function createVisualizer({
       ? describeConversation({ phase, checkpoint, tasks: [...tasks.values()], summary, conversation, run })
       : describeStory({ phase, checkpoint, tasks: [...tasks.values()], summary, database });
     if (!next) { playback.transitioning = true; return; }
-    const key = `${run.id}:${launchId ?? 'restored'}:${checkpoint?.id ?? phase}`;
+    const activity = phase === 'running' ? (conversation?.active_turns ?? []).map(turn => `${turn.task_id}:${turn.stage}`).join(',') : '';
+    const key = `${run.id}:${launchId ?? 'restored'}:${checkpoint?.id ?? phase}:${activity}`;
     if (sceneKey !== key) {
       cancelCue();
       sceneKey = key;
@@ -416,12 +450,13 @@ export async function createVisualizer({
     try {
       await file.writeFile(JSON.stringify({ schema: 1, id: run.id, tasks: run.tasks, work_ms: run.work_ms,
         guided: run.guided, story: run.story, kind: run.kind,
-        ...(run.kind === 'conversation' ? { topic: run.topic, rounds: run.rounds, model: run.model, ollama_url: run.ollama_url } : {}) }) + '\n');
+        ...(run.kind === 'conversation' ? { topic: run.topic, rounds: run.rounds, workflow: run.workflow, model: run.model, ollama_url: run.ollama_url } : {}) }) + '\n');
       await file.sync();
     } finally { await file.close(); }
     await rename(temporary, manifest);
   }
 
+  // Persist the selected plan before spawning one owned writer; await pipe closure before reuse.
   async function launch(options, story = false, chatSettings = null) {
     if (options) {
       validateOptions(options);
@@ -443,6 +478,7 @@ export async function createVisualizer({
     error = null;
     summary = null;
     checkpoint = null;
+    if (conversation) { conversation.active_turns = []; conversation.active = null; }
     launchId = randomUUID();
     checkpointSequence = 0;
     try { await persistRun(); }
@@ -453,7 +489,8 @@ export async function createVisualizer({
     }
     append({ event: 'launching', message: 'Opening the Rust runtime and its single asmDB writer.' });
     const command = run.kind === 'conversation'
-      ? ['chat', `--topic=${run.topic}`, '--model', run.model, '--ollama-url', run.ollama_url, '--rounds', String(run.rounds)]
+      ? ['chat', `--topic=${run.topic}`, '--model', run.model, '--ollama-url', run.ollama_url, '--rounds', String(run.rounds),
+        '--workflow', run.workflow === DISCUSSION ? 'discussion' : 'sequential']
       : ['demo', '--tasks', String(run.tasks), '--workers', '4', '--work-ms', String(run.work_ms)];
     const process = spawn(binary, [
       '--asmdb-dir', asmdbDir, '--data-dir', run.directory,
@@ -497,7 +534,7 @@ export async function createVisualizer({
     process.on('close', code => {
       child = null;
       checkpoint = null;
-      if (conversation) conversation.active = null;
+      if (conversation) { conversation.active_turns = []; conversation.active = null; }
       if (interrupted) {
         phase = 'interrupted';
         summary = null;
@@ -523,6 +560,7 @@ export async function createVisualizer({
 
   if (run?.story || run?.kind === 'conversation') { preparePlayback('paused'); synchronizePlayback(); }
 
+  // Browser commands stay loopback/origin/token-bound; artifact reads verify the observed hashes.
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -584,8 +622,8 @@ export async function createVisualizer({
           let settings;
           try { settings = conversationOptions(body); }
           catch (failure) { throw new HttpError(400, failure.message); }
-          preparePlayback('playing', 'conversation');
-          await launch({ tasks: settings.rounds * 4, work_ms: 0, guided: true }, false, { ...settings, ...modelSettings });
+          preparePlayback('playing', 'conversation', settings);
+          await launch({ tasks: conversationTurns(settings).length, work_ms: 0, guided: true }, false, { ...settings, ...modelSettings });
         } else if (route === '/api/storage') {
           requireEmptyBody(body);
           if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting a storage story.');

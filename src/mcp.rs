@@ -1,3 +1,5 @@
+//! Owns the asmDB bridge process and validates its bounded, newline-delimited MCP exchanges.
+
 use std::{collections::BTreeMap, process::Stdio, time::Duration};
 
 use serde_json::{Value, json};
@@ -22,6 +24,7 @@ pub(crate) struct Mcp {
 }
 
 impl Mcp {
+    // The client owns one bridge; initialization must succeed before any database calls.
     pub async fn open(config: &Config) -> Result<Self> {
         let executable =
             config
@@ -103,6 +106,7 @@ impl Mcp {
             .map_err(transport)
     }
 
+    // One in-flight request gets a single deadline; reject unrelated replies and unbounded output.
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
         self.next_id = self
             .next_id
@@ -150,6 +154,7 @@ impl Mcp {
         .map_err(|_| transport(format!("{method} timed out; outcome is unknown")))?
     }
 
+    // Validate both MCP's content envelope and asmDB's embedded result status.
     pub async fn tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
         let result = self
             .rpc("tools/call", json!({"name": name, "arguments": arguments}))
@@ -176,6 +181,7 @@ impl Mcp {
         }
     }
 
+    // Validate a complete, duplicate-free scan before startup recovery is allowed to mutate rows.
     pub async fn load(&mut self, max_tasks: usize) -> Result<BTreeMap<u64, Task>> {
         let mut tasks = BTreeMap::new();
         let mut offset = 0;
@@ -200,7 +206,7 @@ impl Mcp {
                 }
                 if tasks.len() > max_tasks {
                     return Err(Error::Invalid(format!(
-                        "database exceeds the {max_tasks}-task POC limit"
+                        "database exceeds the configured limit of {max_tasks} tasks"
                     )));
                 }
             }

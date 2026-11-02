@@ -1,3 +1,4 @@
+# Exercise crash recovery at durable boundaries using this invocation's owned process tree.
 #requires -Version 7.0
 param(
     [string]$AsmdbDir = $env:ASMRT_ASMDB_REPO,
@@ -15,10 +16,12 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'Cargo build failed.' }
 }
 if (-not (Test-Path -LiteralPath $binary)) { throw 'Build asmRT first.' }
+# Isolated test directories keep fault injection away from normal demo state.
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('asmrt-fault-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temporary | Out-Null
 $owned = [Collections.Generic.List[object]]::new()
 
+# Pair PIDs with start times so cleanup cannot mistake a reused PID for an owned child.
 function Register-OwnedProcess([Diagnostics.Process]$Process) {
     $owned.Add([pscustomobject]@{ Id = $Process.Id; Started = $Process.StartTime.ToUniversalTime().Ticks })
 }
@@ -54,6 +57,7 @@ function Receive-Task($Task, [int]$Seconds = 30) {
     $Task.GetAwaiter().GetResult()
 }
 
+# Observe an emitted durable boundary before interrupting any process.
 function Wait-Paused($Run, [string]$Stage) {
     for ($index = 0; $index -lt 16; $index++) {
         $line = Receive-Task ($Run.Process.StandardOutput.ReadLineAsync())
@@ -116,6 +120,7 @@ function Resume-Demo([string]$Directory) {
     }
 }
 
+# Lose Rust after publication: recovery must reuse the file without changing its write time.
 try {
     $directory = Join-Path $temporary 'rust-loss'
     $run = Start-TestProcess $directory @('demo', '--tasks', '6', '--workers', '1', '--work-ms', '0', '--pause', 'artifact')
@@ -133,6 +138,7 @@ try {
     }
     Write-Output 'PASS Rust termination after artifact publication: children exit, work resumes, artifact is reused.'
 
+    # Lose a backend process after a claim: the coordinator must fail closed, then recover.
     foreach ($victim in @('Engine', 'Bridge')) {
         $directory = Join-Path $temporary ($victim.ToLowerInvariant() + '-loss')
         $run = Start-TestProcess $directory @('demo', '--tasks', '6', '--workers', '1', '--work-ms', '0', '--pause', 'claim')

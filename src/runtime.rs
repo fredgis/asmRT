@@ -1,3 +1,5 @@
+//! Serializes task operations through one state actor and reconciles interrupted work on reopen.
+
 use std::{collections::BTreeMap, fs, io::Write, path::PathBuf, time::Duration};
 
 use tokio::{
@@ -50,6 +52,7 @@ impl Config {
             ));
         }
         fs::create_dir_all(&self.data_dir).map_err(config_error)?;
+        // Only an empty directory may acquire our marker; unmarked data is never adopted.
         let marker = self.data_dir.join(".asmrt-owner");
         if !marker.exists() {
             if fs::read_dir(&self.data_dir)
@@ -81,6 +84,7 @@ impl Config {
     }
 }
 
+// Cloned handles share a bounded mailbox; only the actor owns the MCP connection and task cache.
 pub struct Runtime {
     state: StateHandle,
     stop: Option<oneshot::Sender<()>>,
@@ -213,6 +217,7 @@ impl StateHandle {
     }
 }
 
+// Finish the current request before shutdown; fatal errors close the actor after replying.
 async fn run_actor(
     mut mcp: Mcp,
     mut tasks: BTreeMap<u64, Task>,
@@ -268,6 +273,7 @@ async fn run_actor(
     outcome.and(closed)
 }
 
+// Update the cache only after asmDB acknowledges a write; callers receive the updated value.
 async fn execute(
     mcp: &mut Mcp,
     tasks: &mut BTreeMap<u64, Task>,
@@ -292,6 +298,7 @@ async fn execute(
             let current = tasks
                 .get(&proposed.id())
                 .ok_or_else(|| Error::Conflict("task does not exist".into()))?;
+            // Owner, attempt, and definition fence old claims even when a worker name is reused.
             if current.owner() != proposed.owner()
                 || current.attempt() != proposed.attempt()
                 || current.definition() != proposed.definition()
@@ -322,7 +329,7 @@ async fn execute(
                 return Ok(Some(existing.clone()));
             }
             if tasks.len() >= max_tasks {
-                return Err(Error::Invalid("POC task limit reached".into()));
+                return Err(Error::Invalid("configured task limit reached".into()));
             }
             persist(mcp, "db_insert", &task).await?;
             tasks.insert(task.id(), task.clone());

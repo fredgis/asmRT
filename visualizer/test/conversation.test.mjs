@@ -1,3 +1,5 @@
+// Exercises real Rust/MCP persistence and browser controls with an explicitly test-only HTTP model.
+// Saved bytes, causal context and request gates distinguish recovery from fresh or sequential inference.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -46,7 +48,7 @@ async function fixture(t, options = {}) {
   });
   await new Promise(resolve => model.listen(0, '127.0.0.1', resolve));
   const dataRoot = await mkdtemp(path.join(tmpdir(), 'asmrt-conversation-test-'));
-  const settings = { asmdbDir, dataRoot, port: 0, conversationModel: 'fixture-chat:tiny',
+  const settings = { asmdbDir, binary: process.env.ASMRT_TEST_BINARY, dataRoot, port: 0, conversationModel: 'fixture-chat:tiny',
     ollamaUrl: `http://127.0.0.1:${model.address().port}`, storySceneMs: 180, ...options };
   let controller;
   t.after(async () => {
@@ -341,6 +343,96 @@ test('pausing a genuine in-flight model request finishes only at its saved-reply
   assert.equal(saved.playback.status, 'paused');
 });
 
+// A held HTTP response cannot hide sequential execution: all siblings must arrive before release.
+test('discussion fans out concurrent requests, preserves wave context and replays offline', enabled, async t => {
+  const f = await fixture(t, { storySceneMs: 60000 });
+  const ready = await startPaused(f, { rounds: 2, workflow: 'conversation.discussion' });
+  assert.equal(ready.run.workflow, 'conversation.discussion');
+  assert.deepEqual(ready.conversation.workflow, { kind: 'conversation.discussion', version: 1 });
+  await next(f, 'claimed', '1');
+  await next(f, 'published', '1');
+  await next(f, 'completed', '1');
+  const claimed = await next(f, 'claimed', '2');
+  assert.deepEqual(claimed.checkpoint.task_ids, ['2', '3', '4']);
+  f.hold();
+  assert.equal((await f.post('next', { checkpoint: claimed.checkpoint.id })).status, 202);
+  const concurrent = await until(f.state, state => f.requests.length === 4
+    && state.conversation.active_turns.length === 3
+    && state.conversation.active_turns.every(turn => turn.stage === 'generating'), 'three sibling requests did not overlap');
+  assert.deepEqual(concurrent.conversation.active_turns.map(turn => turn.agent_id), ['builder', 'critic', 'editor']);
+  assert(concurrent.conversation.active_turns.every(turn => JSON.stringify(turn.input_ids) === '["1"]'));
+  assert.equal(concurrent.conversation.messages.length, 1, 'no sibling reply exists before the gate opens');
+  const inputs = f.requests.slice(1).map(request => request.body.messages.slice(1, -1));
+  assert.deepEqual(inputs[0], inputs[1]);
+  assert.deepEqual(inputs[1], inputs[2]);
+  f.release();
+  const published = await until(f.state, state => state.checkpoint?.stage === 'published', 'debate replies were not published');
+  assert.deepEqual(published.conversation.messages.map(message => message.task_id), ['1', '2', '3', '4']);
+  assert(published.conversation.active_turns.every(turn => turn.stage === 'saved'));
+  const originals = await savedFiles(published.run, ['1', '2', '3', '4']);
+
+  // Reopen between publication and commitment; all three saved replies must be reused offline.
+  assert.equal((await f.post('interrupt')).status, 202);
+  await f.restart();
+  assert.equal((await f.state()).run.workflow, 'conversation.discussion');
+  const tagsBeforeReuse = f.tags;
+  f.available = false;
+  assert.equal((await f.post('resume')).status, 202);
+  const recovered = await until(f.state, state => state.checkpoint?.stage === 'ready', 'discussion did not reopen');
+  assert.equal(recovered.run.id, ready.run.id);
+  assert.deepEqual(recovered.conversation.messages.map(message => message.task_id), ['1']);
+  assert.deepEqual(recovered.conversation.active_turns, []);
+  await next(f, 'claimed', '2');
+  const reused = await next(f, 'published', '2');
+  assert(reused.conversation.messages.filter(message => ['2', '3', '4'].includes(message.task_id)).every(message => message.reused));
+  assert.equal(f.requests.length, 4);
+  assert.equal(f.tags, tagsBeforeReuse);
+  await next(f, 'completed', '2');
+  await assertPreserved(originals);
+
+  // The teaching crash affects a whole later wave and must not repeat after recovery.
+  f.available = true;
+  const secondWave = await next(f, 'claimed', '5');
+  assert.equal(secondWave.playback.scene.id, 'chat-crash-next');
+  assert.deepEqual(secondWave.checkpoint.task_ids, ['5', '6', '7']);
+  assert.equal((await f.post('interrupt')).status, 202);
+  assert.equal((await f.post('resume')).status, 202);
+  await until(f.state, state => state.checkpoint?.stage === 'ready', 'second wave did not recover');
+  const retry = await next(f, 'claimed', '5');
+  assert.equal(retry.playback.scene.id, 'chat-assigned');
+  assert(retry.tasks.filter(task => ['5', '6', '7'].includes(task.id)).every(task => task.attempt === '2'));
+  const debated = await next(f, 'published', '5');
+  for (const message of debated.conversation.messages.filter(message => Number(message.task_id) >= 5)) {
+    assert.deepEqual(message.input_ids, ['1', '2', '3', '4']);
+  }
+  for (const request of f.requests.slice(4, 7)) {
+    for (const previous of debated.conversation.messages.slice(0, 4)) {
+      assert(request.body.messages.some(message => message.content.includes(previous.text)), 'later peers must see every prior committed view');
+    }
+  }
+  await next(f, 'completed', '5');
+  const synthesis = await next(f, 'claimed', '8');
+  assert.deepEqual(synthesis.conversation.active_turns.map(turn => turn.agent_id), ['editor']);
+  assert.deepEqual(synthesis.conversation.active.input_ids, ['1', '2', '3', '4', '5', '6', '7']);
+  const result = await next(f, 'published', '8');
+  assert.match(f.requests.at(-1).body.messages.at(-1).content, /final|decision|synthes/i);
+  assert.equal((await f.post('next', { checkpoint: result.checkpoint.id })).status, 202);
+  const finished = await until(f.state, state => state.phase === 'finished', 'discussion did not finish');
+  assert.equal(finished.summary.completed, 8);
+  assert.equal(f.requests.length, 8);
+  assert.deepEqual(finished.conversation.active_turns, []);
+  const allReplies = await savedFiles(finished.run, ['1', '2', '3', '4', '5', '6', '7', '8']);
+  const tagsBeforeReplay = f.tags;
+  f.available = false;
+  assert.equal((await f.post('resume')).status, 202);
+  const verified = await until(f.state, state => state.phase === 'finished', 'offline replay did not finish');
+  assert.equal(verified.summary.completed_now, 0);
+  assert.equal(verified.summary.model_calls_now, 0);
+  assert.equal(f.requests.length, 8);
+  assert.equal(f.tags, tagsBeforeReplay);
+  await assertPreserved(allReplies);
+});
+
 for (const mutation of ['modified job', 'missing job', 'missing plan', 'unsupported handler']) {
   test(`${mutation} is rejected before inference instead of guessing the work from its status`, enabled, async t => {
     const f = await fixture(t, { storySceneMs: 60000 });
@@ -389,7 +481,7 @@ test('conversation commands preserve local authorization, validate topics and tr
   const unauthorized = await fetch(`${f.url}/api/conversation`, { method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: 'https://unrelated.example' }, body: '{}' });
   assert.equal(unauthorized.status, 403);
-  for (const body of [null, [], { topic: '' }, { topic: 'x'.repeat(401) }, { topic: 'bad\0topic' }, { rounds: 0 }, { rounds: 4 }, { model: 'remote' }, { ollama_url: 'https://example.com' }]) {
+  for (const body of [null, [], { topic: '' }, { topic: 'x'.repeat(401) }, { topic: 'bad\0topic' }, { rounds: 0 }, { rounds: 4 }, { workflow: null }, { workflow: 'parallel' }, { workflow: { kind: 'conversation.discussion' } }, { model: 'remote' }, { ollama_url: 'https://example.com' }]) {
     assert.equal((await f.post('conversation', body)).status, 400);
   }
   assert.equal((await f.get('/api/definitions/1')).status, 404);

@@ -1,3 +1,6 @@
+// Project acknowledged deterministic-demo state into scene copy, controls, and pacing.
+
+// The catalog follows publication and completion separately, then recovery and zero-work replay.
 const scenes = [
   ['queued', 'Queue', 'First, put the work in asmDB.', 'Eight pending records, one per result file. The workers have not claimed anything yet.', 'database', 'Assign four tasks', 'next', 7000],
   ['assigned', 'Work', 'Four workers claim four tasks.', 'Each owner is saved in asmDB before work starts. The other four records stay pending.', 'workers', 'Write the first files', 'next', 6500],
@@ -17,6 +20,7 @@ export function describeStory({ phase, checkpoint, tasks, summary, database }) {
   const completed = tasks.filter(task => task.state === 'completed').length;
   const running = tasks.filter(task => task.state === 'running');
   const retried = running.some(task => BigInt(task.attempt) > 1n);
+  // Only paused, interrupted, and finished states have a stable story frame.
   if (phase === 'paused') {
     if (checkpoint?.stage === 'ready') index = tasks.some(task => task.attempt !== '0') ? 6 : 0;
     else if (checkpoint?.stage === 'claimed') index = retried ? 7 : completed === 4 ? 4 : 1;
@@ -27,6 +31,7 @@ export function describeStory({ phase, checkpoint, tasks, summary, database }) {
   if (index === undefined) return null;
   const [id, chapter, title, description, focus, next_label, action, duration_ms] = scenes[index];
   const result = { index, total: scenes.length, scene: { id, chapter, title, description, focus, next_label }, action, duration_ms };
+  // Adapt observed counts and recovery context without mutating the shared scene catalog.
   if (index === 1) {
     if (running.length !== 4) result.scene.title = 'Work is assigned before it starts.';
     result.scene.description = `Each owner is saved in asmDB before work starts. ${tasks.filter(task => task.state === 'pending').length} records stay pending.`;

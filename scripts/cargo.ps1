@@ -1,6 +1,9 @@
+# Run Cargo from the repository, preferring its local toolchain when installed.
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $localCargo = Join-Path $root '.tools\cargo\bin\cargo.exe'
+# Save caller state so the finally block also restores it when Cargo fails.
 $previous = @{
     CARGO_HOME = $env:CARGO_HOME
     RUSTUP_HOME = $env:RUSTUP_HOME

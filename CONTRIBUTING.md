@@ -1,6 +1,6 @@
 # Contributing to asmRT
 
-asmRT is a local Rust runtime prototype over [asmDB](https://github.com/fredgis/asmDB). Contributions should make execution easier to recover, inspect or test. Open an issue before changing the durability contract or introducing a new workflow type.
+asmRT is a Rust runtime for durable agents, built on [asmDB](https://github.com/fredgis/asmDB). Contributions should make execution easier to recover, inspect or test. Open an issue before changing the durability contract or introducing a new workflow type.
 
 ## Set up locally
 
@@ -23,9 +23,9 @@ Read the [architecture](Docs/ARCHITECTURE.md) for process boundaries and the [do
 
 ## Workflow changes
 
-The implemented agent workflow is **Workflow 1: sequential conversation**, identified by `conversation.sequential`, version `1`. Rust supplies every role with all earlier committed replies and executes one model call at a time.
+Two agent workflows are implemented: **Workflow 1: sequential conversation** (`conversation.sequential` v1) and **Workflow 2: discussion** (`conversation.discussion` v1). The first supplies an ordered committed prefix to one speaker at a time. The second runs three peers concurrently over the same prior-wave inputs, then joins their committed replies before continuing or synthesizing a decision.
 
-A new workflow needs its own explicit contract for ordering, inputs, completion, retries and recovery. Update [WORKFLOWS.md](Docs/WORKFLOWS.md), the architecture, domain vocabulary and README as appropriate. Workflow versions and job-handler versions are separate. Parallel and conditional agent workflows are not currently implemented.
+A new workflow needs its own explicit contract for ordering, inputs, completion, retries and recovery. Update [WORKFLOWS.md](Docs/WORKFLOWS.md), the architecture, domain vocabulary and README as appropriate. Workflow versions and job-handler versions are separate. Conditional routing and arbitrary user-defined graphs are future extensions.
 
 ## Validate your change
 

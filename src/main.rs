@@ -1,3 +1,5 @@
+//! CLI entry point for durable demos, chat, status, and JSON lifecycle events.
+
 #![forbid(unsafe_code)]
 
 mod chat;
@@ -97,6 +99,7 @@ async fn main() -> ExitCode {
     }
 }
 
+// One coordinator owns the invocation; shutdown precedes the final success summary.
 async fn run(cli: Cli) -> CliResult<()> {
     if matches!(&cli.command, Action::Demo(options) if options.pause.is_some() && options.workers != 1)
     {
@@ -142,6 +145,7 @@ async fn run(cli: Cli) -> CliResult<()> {
     Ok(())
 }
 
+// Resume only this deterministic task set, verifying completed files before adding work.
 async fn demo(state: StateHandle, directory: PathBuf, options: Demo) -> CliResult<Value> {
     let existing = state.list().await?;
     if existing.iter().any(|task| {
@@ -200,6 +204,7 @@ async fn demo(state: StateHandle, directory: PathBuf, options: Demo) -> CliResul
     Ok(summary)
 }
 
+// Each worker publishes its artifact before asking the actor to persist completion.
 async fn run_workers(state: StateHandle, directory: PathBuf, options: Demo) -> CliResult<u32> {
     let mut workers = JoinSet::new();
     for index in 1..=options.workers {
@@ -245,6 +250,7 @@ async fn run_workers(state: StateHandle, directory: PathBuf, options: Demo) -> C
     Ok(completed_now)
 }
 
+// Join each batch stage before exposing a database read and numbered stdin checkpoint.
 async fn guided_workers(state: StateHandle, directory: PathBuf, options: Demo) -> CliResult<u32> {
     if state
         .list()
@@ -385,6 +391,7 @@ async fn wait_for_resume(claim: &Task, stage: Pause) -> CliResult<()> {
     Ok(())
 }
 
+// Task events preserve decimal-string identifiers alongside the encoded asmDB record.
 fn task_view(task: &Task) -> asmrt::Result<Value> {
     let state = match task.state() {
         TaskState::Pending => "pending",
@@ -426,6 +433,7 @@ fn summarize(tasks: &[Task], event: &str) -> Value {
     })
 }
 
+// Deterministic files live outside asmDB; retries verify and reuse existing bytes.
 fn artifact_reference(id: u64) -> String {
     format!("artifact:{id}")
 }

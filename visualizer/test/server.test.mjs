@@ -1,3 +1,5 @@
+// Verifies the local controller's real process lifecycle, checkpoint pacing and safe browser commands.
+// Each fixture owns an isolated run directory and cleans up its writer before removing files.
 import assert from 'node:assert/strict';
 import { ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -12,7 +14,8 @@ const asmdbDir = process.env.ASMRT_ASMDB_REPO;
 
 async function fixture(t, options = {}) {
   const dataRoot = await mkdtemp(path.join(tmpdir(), 'asmrt-visual-test-'));
-  let server = await createVisualizer({ asmdbDir, dataRoot, port: 0, ...options });
+  const settings = { asmdbDir, binary: process.env.ASMRT_TEST_BINARY, dataRoot, port: 0, ...options };
+  let server = await createVisualizer(settings);
   t.after(async () => {
     await server.close();
     await rm(dataRoot, { recursive: true, force: true });
@@ -34,7 +37,7 @@ async function fixture(t, options = {}) {
     server, dataRoot, state, post,
     async restart() {
       await server.close();
-      server = await createVisualizer({ asmdbDir, dataRoot, port: 0, ...options });
+      server = await createVisualizer(settings);
     },
   };
 }

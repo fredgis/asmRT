@@ -1,4 +1,7 @@
+//! Immutable local-model conversations, validated replay, and durable turn orchestration.
+
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Read, Write},
     net::IpAddr,
@@ -6,13 +9,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use asmrt::{DefinitionRef, StateHandle, TaskState};
+use asmrt::{DefinitionRef, StateHandle, Task, TaskState};
 use clap::Args;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::io::BufReader;
+use tokio::{io::BufReader, task::JoinSet};
 
 use crate::{
     CliResult, artifact_path, emit, emit_database_read, emit_task, summarize, task_view,
@@ -27,6 +30,12 @@ const AGENT_IDS: [&str; 4] = ["planner", "builder", "critic", "editor"];
 
 #[derive(Args)]
 pub(crate) struct Options {
+    #[arg(
+        long,
+        value_enum,
+        help = "Workflow for a new conversation (defaults to sequential); saved plans retain their workflow"
+    )]
+    workflow: Option<WorkflowKind>,
     #[arg(
         long,
         help = "Topic for a new conversation; existing conversations retain their saved topic"
@@ -51,7 +60,7 @@ pub(crate) struct Options {
     #[arg(
         long,
         requires = "events",
-        help = "Wait for numbered stdin cues at real turn boundaries"
+        help = "Wait for numbered stdin cues at real turn or wave boundaries"
     )]
     pub(crate) guided: bool,
 }
@@ -99,11 +108,53 @@ struct Workflow {
     version: u32,
 }
 
+// Workflow versions govern fixed topology; job versions still govern request encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum WorkflowKind {
+    Sequential,
+    Discussion,
+}
+
+impl WorkflowKind {
+    fn descriptor(self) -> Workflow {
+        Workflow {
+            kind: match self {
+                Self::Sequential => "conversation.sequential",
+                Self::Discussion => "conversation.discussion",
+            }
+            .into(),
+            version: 1,
+        }
+    }
+
+    fn turn_count(self, rounds: u8) -> usize {
+        match self {
+            Self::Sequential => usize::from(rounds) * 4,
+            Self::Discussion => usize::from(rounds) * 3 + 2,
+        }
+    }
+
+    fn turn_layout(self, index: usize, total: usize) -> (usize, Vec<String>) {
+        let (agent, inputs) = match self {
+            Self::Sequential => (index % 4, index),
+            Self::Discussion if index == 0 => (0, 0),
+            Self::Discussion if index + 1 == total => (3, index),
+            Self::Discussion => (1 + (index - 1) % 3, 1 + (index - 1) / 3 * 3),
+        };
+        (agent, (1..=inputs).map(|id| id.to_string()).collect())
+    }
+}
+
 impl Workflow {
     fn sequential() -> Self {
-        Self {
-            kind: "conversation.sequential".into(),
-            version: 1,
+        WorkflowKind::Sequential.descriptor()
+    }
+
+    fn resolve(&self) -> CliResult<WorkflowKind> {
+        match (self.kind.as_str(), self.version) {
+            ("conversation.sequential", 1) => Ok(WorkflowKind::Sequential),
+            ("conversation.discussion", 1) => Ok(WorkflowKind::Discussion),
+            _ => Err(invalid("unsupported saved conversation workflow kind or version").into()),
         }
     }
 }
@@ -142,6 +193,7 @@ struct Reply {
     created_at_ms: u64,
 }
 
+#[derive(Clone)]
 struct SavedReply {
     reply: Reply,
     sha256: String,
@@ -382,21 +434,51 @@ fn saved_instruction(topic: &str, id: u64, total: u64) -> String {
     format!("{update}{instruction} Keep your whole reply to about 20 words.")
 }
 
+fn discussion_instruction(id: u64, total: u64) -> String {
+    let instruction = if id == 1 {
+        "Seed the discussion with one concrete, practical idea for our goal. Give the team a proposal to improve.".into()
+    } else if id == total {
+        "Deliver the final concrete decision, not another debate reply. Synthesize the team's proposals, settle the remaining objection, and assign named teammates specific jobs.".into()
+    } else {
+        let round = (id - 2) / 3 + 1;
+        let instruction = match ((id - 2) % 3, round) {
+            (0, 1) => {
+                "Answer Planner by name. Build on the seed idea with one practical step and a job you will take."
+            }
+            (1, 1) => {
+                "Challenge one weakness in Planner's seed idea by name and offer a practical fix."
+            }
+            (2, 1) => {
+                "Assess Planner's seed idea by name and propose a concrete compromise for the team to discuss."
+            }
+            (0, _) => {
+                "Explicitly answer Critic's preceding objection and Editor's preceding proposal by name. State your disagreement or convergence and revise your practical step."
+            }
+            (1, _) => {
+                "Explicitly answer Builder's preceding proposal and Editor's preceding compromise by name. State your disagreement or convergence; accept the fix or give a better one."
+            }
+            _ => {
+                "Explicitly answer Builder's and Critic's preceding proposals by name. Identify their disagreement or convergence and propose one practical compromise."
+            }
+        };
+        format!("Discussion round {round}. {instruction}")
+    };
+    format!("{instruction} Keep your whole reply to about 20 words.")
+}
+
 impl Plan {
     fn effective_workflow(&self) -> Workflow {
         self.workflow.clone().unwrap_or_else(Workflow::sequential)
     }
 
     fn validate(&self) -> CliResult<()> {
-        if self.effective_workflow() != Workflow::sequential() {
-            return Err(invalid("unsupported saved conversation workflow kind or version").into());
-        }
+        let workflow = self.effective_workflow().resolve()?;
         if self.schema != "asmrt.conversation.v1"
             || !(1..=3).contains(&self.rounds)
             || self.topic.trim().is_empty()
             || self.topic.chars().count() > 400
             || self.agents.len() != 4
-            || self.turns.len() != usize::from(self.rounds) * 4
+            || self.turns.len() != workflow.turn_count(self.rounds)
             || self.model.provider != "ollama"
             || self.model.name.is_empty()
             || self.model.name.len() > 100
@@ -422,14 +504,15 @@ impl Plan {
             }
         }
         for (index, job) in self.turns.iter().enumerate() {
+            let (agent, input_ids) = workflow.turn_layout(index, self.turns.len());
             if job.schema != "asmrt.task.v1"
                 || job.kind != "llm.chat.turn"
                 || !(1..=3).contains(&job.version)
                 || job.id != index as u64 + 1
-                || job.agent != self.agents[index % 4]
+                || job.agent != self.agents[agent]
                 || job.model != self.model
                 || job.topic != self.topic
-                || job.input_ids != (1..job.id).map(|id| id.to_string()).collect::<Vec<_>>()
+                || job.input_ids != input_ids
                 || job.instruction.is_empty()
                 || job.instruction.len() > 4096
             {
@@ -452,9 +535,12 @@ impl Plan {
             let plan: Self = serde_json::from_slice(&bytes)?;
             plan.validate()?;
             if options
-                .topic
-                .as_ref()
-                .is_some_and(|topic| topic.trim() != plan.topic)
+                .workflow
+                .is_some_and(|workflow| workflow.descriptor() != plan.effective_workflow())
+                || options
+                    .topic
+                    .as_ref()
+                    .is_some_and(|topic| topic.trim() != plan.topic)
                 || options
                     .model
                     .as_ref()
@@ -514,23 +600,31 @@ impl Plan {
         };
         let agents = agents();
         let rounds = options.rounds.unwrap_or(2);
-        let total = u64::from(rounds) * 4;
-        let turns = (1..=total)
-            .map(|id| Job {
-                schema: "asmrt.task.v1".into(),
-                kind: "llm.chat.turn".into(),
-                version: 3,
-                id,
-                agent: agents[(id as usize - 1) % 4].clone(),
-                topic: topic.clone(),
-                model: model.clone(),
-                input_ids: (1..id).map(|previous| previous.to_string()).collect(),
-                instruction: saved_instruction(&topic, id, total),
+        let workflow = options.workflow.unwrap_or(WorkflowKind::Sequential);
+        let total = workflow.turn_count(rounds);
+        let turns = (0..total)
+            .map(|index| {
+                let id = index as u64 + 1;
+                let (agent, input_ids) = workflow.turn_layout(index, total);
+                Job {
+                    schema: "asmrt.task.v1".into(),
+                    kind: "llm.chat.turn".into(),
+                    version: 3,
+                    id,
+                    agent: agents[agent].clone(),
+                    topic: topic.clone(),
+                    model: model.clone(),
+                    input_ids,
+                    instruction: match workflow {
+                        WorkflowKind::Sequential => saved_instruction(&topic, id, total as u64),
+                        WorkflowKind::Discussion => discussion_instruction(id, total as u64),
+                    },
+                }
             })
             .collect();
         let plan = Self {
             schema: "asmrt.conversation.v1".into(),
-            workflow: Some(Workflow::sequential()),
+            workflow: Some(workflow.descriptor()),
             topic,
             model,
             agents,
@@ -710,6 +804,34 @@ async fn generate(
     Ok(SavedReply { reply, sha256 })
 }
 
+fn committed_inputs(job: &Job, history: &BTreeMap<u64, SavedReply>) -> CliResult<Vec<SavedReply>> {
+    job.input_ids
+        .iter()
+        .map(|id| {
+            history.get(&id.parse::<u64>()?).cloned().ok_or_else(|| {
+                invalid(format!(
+                    "turn {} is missing earlier completed dependency {id}",
+                    job.id
+                ))
+                .into()
+            })
+        })
+        .collect()
+}
+
+async fn complete_reply(
+    state: &StateHandle,
+    claim: &Task,
+    saved: &SavedReply,
+    events: bool,
+) -> CliResult<Task> {
+    let done = state.complete(claim, &saved.sha256).await?;
+    if events {
+        emit_task("task_completed", &done)?;
+    }
+    Ok(done)
+}
+
 pub(crate) async fn run(
     state: StateHandle,
     directory: PathBuf,
@@ -751,17 +873,13 @@ pub(crate) async fn run(
             _ => {}
         }
     }
-    let mut history = Vec::new();
-    let mut unfinished = false;
+    // Restore only native commitments. Discussion siblings may have gaps, but dependencies may not.
+    let mut history = BTreeMap::new();
     for job in &plan.turns {
         let task = existing.iter().find(|task| task.id() == job.id);
         if let Some(task) = task.filter(|task| task.state() == TaskState::Completed) {
-            if unfinished {
-                return Err(
-                    invalid("a completed turn is missing an earlier completed dependency").into(),
-                );
-            }
-            let saved = load_reply(&directory, job, &history)?
+            let inputs = committed_inputs(job, &history)?;
+            let saved = load_reply(&directory, job, &inputs)?
                 .ok_or_else(|| invalid("a completed conversation reply is missing"))?;
             if task.artifact() != Some(saved.sha256.as_str()) {
                 return Err(invalid(
@@ -769,9 +887,7 @@ pub(crate) async fn run(
                 )
                 .into());
             }
-            history.push(saved);
-        } else {
-            unfinished = true;
+            history.insert(job.id, saved);
         }
     }
     for job in &plan.turns {
@@ -789,78 +905,133 @@ pub(crate) async fn run(
         );
         ready["conversation"] = json!({"schema":plan.schema,"workflow":plan.effective_workflow(),"topic":plan.topic,"model":plan.model,"agents":plan.agents,"rounds":plan.rounds,
             "turns_total":plan.turns.len(),"definition_file":"conversation.json","definition_sha256":plan_sha256,
-            "messages":history.iter().map(|saved| { let mut value = serde_json::to_value(&saved.reply).expect("serializable reply"); value["committed"] = json!(true); value["reused"] = json!(true); value }).collect::<Vec<_>>(),"active":null});
+            "turns":plan.turns.iter().map(|job| json!({"task_id":job.id.to_string(),"agent_id":job.agent.id,"input_ids":job.input_ids})).collect::<Vec<_>>(),
+            "messages":history.values().map(|saved| { let mut value = serde_json::to_value(&saved.reply).expect("serializable reply"); value["committed"] = json!(true); value["reused"] = json!(true); value }).collect::<Vec<_>>(),"active":null});
     }
     emit(&ready)?;
     let mut input = BufReader::new(tokio::io::stdin());
     let mut sequence = 0;
     if options.guided && history.len() < plan.turns.len() {
-        wait_for_step(&state, &mut input, &mut sequence, "ready", &[]).await?;
+        let wave = plan
+            .turns
+            .chunk_by(|a, b| a.input_ids == b.input_ids)
+            .find(|wave| wave.iter().any(|job| !history.contains_key(&job.id)))
+            .expect("unfinished plan has a pending wave");
+        let waiting: Vec<_> = state
+            .list()
+            .await?
+            .into_iter()
+            .filter(|task| {
+                wave.iter().any(|job| job.id == task.id()) && !history.contains_key(&task.id())
+            })
+            .collect();
+        wait_for_step(&state, &mut input, &mut sequence, "ready", &waiting).await?;
     }
     let client = client()?;
     let mut calls = 0;
     let mut reused = 0;
     let mut completed = 0;
-    for job in plan.turns.iter().skip(history.len()) {
-        let claim = state
-            .claim_next(&job.agent.id)
-            .await?
-            .ok_or_else(|| invalid("the next conversation turn is not pending"))?;
-        if claim.id() != job.id {
-            return Err(invalid("unexpected dependency order; no inference will run").into());
-        }
-        if options.events {
-            emit_task("task_claimed", &claim)?;
-        }
-        if options.guided {
-            wait_for_step(
-                &state,
-                &mut input,
-                &mut sequence,
-                "claimed",
-                std::slice::from_ref(&claim),
-            )
-            .await?;
-        }
-        let (saved, was_reused) = match load_reply(&directory, job, &history)? {
-            Some(saved) => {
-                reused += 1;
-                (saved, true)
-            }
-            None => {
-                let saved = generate(&client, job, &history, options.events).await?;
-                publish(
-                    &artifact_path(&directory, job.id),
-                    &serde_json::to_vec(&saved.reply)?,
-                )?;
-                calls += 1;
-                (saved, false)
-            }
+    // Validation fixes the topology: equal input lists group only the three discussion siblings.
+    for wave in plan.turns.chunk_by(|a, b| a.input_ids == b.input_ids) {
+        let pending: Vec<_> = wave
+            .iter()
+            .filter(|job| !history.contains_key(&job.id))
+            .collect();
+        let Some(first) = pending.first() else {
+            continue;
         };
-        if options.events {
-            emit(
-                &json!({"event":"artifact_published","task_id":claim.id().to_string(),"owner":claim.owner(),"attempt":claim.attempt().to_string(),"artifact":saved.sha256}),
-            )?;
-            emit(&json!({"event":"message_published","message":saved.reply,"reused":was_reused}))?;
+        let inputs = committed_inputs(first, &history)?;
+        let mut prepared = Vec::new();
+        for job in pending {
+            prepared.push((job, load_reply(&directory, job, &inputs)?));
+        }
+        // claim_next selects the lowest pending ID, so claim the entire wave before spawning it.
+        let mut claims = Vec::new();
+        for (job, _) in &prepared {
+            let claim = state
+                .claim_next(&job.agent.id)
+                .await?
+                .ok_or_else(|| invalid("the next conversation turn is not pending"))?;
+            if claim.id() != job.id {
+                return Err(invalid("unexpected dependency order; no inference will run").into());
+            }
+            if options.events {
+                emit_task("task_claimed", &claim)?;
+            }
+            claims.push(claim);
         }
         if options.guided {
-            wait_for_step(
-                &state,
-                &mut input,
-                &mut sequence,
-                "published",
-                std::slice::from_ref(&claim),
-            )
-            .await?;
+            wait_for_step(&state, &mut input, &mut sequence, "claimed", &claims).await?;
         }
-        let done = state.complete(&claim, &saved.sha256).await?;
-        if options.events {
-            emit_task("task_completed", &done)?;
+        let mut workers = JoinSet::<CliResult<(Task, SavedReply, bool)>>::new();
+        for ((job, cached), claim) in prepared.into_iter().zip(claims.iter().cloned()) {
+            let job = job.clone();
+            let inputs = inputs.clone();
+            let client = client.clone();
+            let directory = directory.clone();
+            let events = options.events;
+            workers.spawn(async move {
+                let (saved, was_reused) = match cached {
+                    Some(saved) => (saved, true),
+                    None => {
+                        let saved = generate(&client, &job, &inputs, events).await?;
+                        publish(
+                            &artifact_path(&directory, job.id),
+                            &serde_json::to_vec(&saved.reply)?,
+                        )?;
+                        (saved, false)
+                    }
+                };
+                Ok((claim, saved, was_reused))
+            });
         }
-        history.push(saved);
-        completed += 1;
-        if options.guided && history.len() < plan.turns.len() {
-            wait_for_step(&state, &mut input, &mut sequence, "completed", &[done]).await?;
+        let mut published = Vec::new();
+        let mut failure = None;
+        while let Some(result) = workers.join_next().await {
+            let result = result.unwrap_or_else(|error| Err(error.into()));
+            match result {
+                Ok((claim, saved, was_reused)) => {
+                    calls += u32::from(!was_reused);
+                    reused += u32::from(was_reused);
+                    if options.events {
+                        emit(
+                            &json!({"event":"artifact_published","task_id":claim.id().to_string(),"owner":claim.owner(),"attempt":claim.attempt().to_string(),"artifact":saved.sha256}),
+                        )?;
+                        emit(
+                            &json!({"event":"message_published","message":saved.reply,"reused":was_reused}),
+                        )?;
+                    }
+                    if options.guided {
+                        published.push((claim, saved));
+                    } else {
+                        complete_reply(&state, &claim, &saved, options.events).await?;
+                        history.insert(claim.id(), saved);
+                        completed += 1;
+                    }
+                }
+                Err(error) => {
+                    // Preserve successful siblings, but never advance past a failed wave.
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if options.guided {
+            wait_for_step(&state, &mut input, &mut sequence, "published", &claims).await?;
+            let mut done = Vec::new();
+            for (claim, saved) in published {
+                done.push(complete_reply(&state, &claim, &saved, options.events).await?);
+                history.insert(claim.id(), saved);
+                completed += 1;
+            }
+            done.sort_unstable_by_key(Task::id);
+            if history.len() < plan.turns.len() {
+                wait_for_step(&state, &mut input, &mut sequence, "completed", &done).await?;
+            }
         }
     }
     if options.events {
@@ -953,6 +1124,7 @@ mod tests {
 
     fn options() -> Options {
         Options {
+            workflow: None,
             topic: None,
             model: None,
             ollama_url: None,
@@ -1071,11 +1243,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discussion_plans_require_the_fixed_role_order_and_complete_prior_waves() {
+        let mut plan = legacy_plan(3);
+        plan.workflow = Some(Workflow {
+            kind: "conversation.discussion".into(),
+            version: 1,
+        });
+        for (job, role) in plan.turns.iter_mut().zip([0, 1, 2, 3, 1, 2, 3, 3]) {
+            job.agent = plan.agents[role].clone();
+        }
+        for job in &mut plan.turns[1..4] {
+            job.input_ids = vec!["1".into()];
+        }
+        for job in &mut plan.turns[4..7] {
+            job.input_ids = vec!["1".into(), "2".into(), "3".into(), "4".into()];
+        }
+        let directory = fixture_directory();
+        let filename = directory.path().join("conversation.json");
+        let bytes = serde_json::to_vec(&plan).unwrap();
+        publish(&filename, &bytes).unwrap();
+        let (loaded, _) = Plan::prepare(directory.path(), &options(), false)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_vec(&loaded).unwrap(), bytes);
+
+        // Sibling context and incomplete fan-in both violate the saved workflow contract.
+        for turn in [2, 7] {
+            let mut invalid: Plan = serde_json::from_slice(&bytes).unwrap();
+            if turn == 2 {
+                invalid.turns[turn].input_ids.push("2".into());
+            } else {
+                invalid.turns[turn].input_ids.pop();
+            }
+            fs::write(&filename, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                Plan::prepare(directory.path(), &options(), false)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+        plan.turns[7].agent = plan.agents[0].clone();
+        assert!(
+            plan.validate().is_err(),
+            "the final turn must be Editor's synthesis"
+        );
+    }
+
+    #[tokio::test]
     async fn unsupported_workflows_are_rejected_without_preparing_saved_work() {
         for (kind, version) in [
             ("conversation.unknown", 1),
             ("conversation.sequential", 0),
             ("conversation.sequential", 2),
+            ("conversation.discussion", 0),
+            ("conversation.discussion", 2),
         ] {
             let directory = fixture_directory();
             let mut plan = legacy_plan(3);

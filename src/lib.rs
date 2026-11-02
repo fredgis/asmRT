@@ -1,3 +1,5 @@
+//! Public task and state-actor API for durable coordination through the asmDB MCP bridge.
+
 #![forbid(unsafe_code)]
 
 mod mcp;
@@ -21,6 +23,7 @@ pub enum Error {
     Closed,
 }
 
+// Backend and transport failures stop the actor rather than allow further operations.
 impl Error {
     fn is_fatal(&self) -> bool {
         matches!(self, Self::Transport(_) | Self::Backend(_))

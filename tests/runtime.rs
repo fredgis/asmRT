@@ -1,7 +1,10 @@
+//! Real-asmDB integration tests for actor serialization, persistence, and recovery.
+
 use std::path::PathBuf;
 
 use asmrt::{Config, Runtime, TaskState};
 
+// Ignored by default: tests supply isolated state to an external, already-built asmDB checkout.
 fn config(directory: &std::path::Path) -> Config {
     let repo = std::env::var_os("ASMRT_ASMDB_REPO")
         .map(PathBuf::from)
@@ -71,6 +74,7 @@ async fn concurrent_workers_cannot_claim_the_same_task_twice() {
     let runtime = Runtime::open(config(directory.path())).await.unwrap();
     let state = runtime.state();
     state.enqueue(42).await.unwrap();
+    // Workers race through cloned handles; only the actor may choose a pending task.
     let mut workers = tokio::task::JoinSet::new();
     for index in 0..16 {
         let state = state.clone();
@@ -132,6 +136,7 @@ async fn reopening_recovers_interrupted_work_and_fences_old_attempts_even_for_th
     let interrupted = old_state.claim_next("builder").await.unwrap().unwrap();
     runtime.shutdown().await.unwrap();
 
+    // Reuse the same worker name after reopening: the attempt counter must fence its old claim.
     let runtime = Runtime::open(settings).await.unwrap();
     let state = runtime.state();
     let recovered = state.get(12).await.unwrap().unwrap();
@@ -178,6 +183,7 @@ async fn reopening_loads_tasks_beyond_the_first_mcp_page() {
     assert_eq!(tasks.last().unwrap().id(), 1001);
 }
 
+// Isolation failures must preserve unrelated files and leave the existing writer usable.
 #[tokio::test]
 #[ignore = "requires the existing asmDB binary and Node MCP dependencies"]
 async fn data_directory_guards_reject_unrelated_files_and_second_writers() {

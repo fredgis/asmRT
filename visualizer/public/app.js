@@ -1,4 +1,5 @@
-import { nativeRecordFields, conversationChapter, conversationMemory } from "/console-view.mjs";
+// Renders the local demo, preserving saved transcripts while workflow controls dispatch explicit controller commands.
+import { nativeRecordFields, conversationChapter, conversationMemory, conversationWorkflow, conversationActiveTurns, isConversationWorkflow, validConversation } from "/console-view.mjs";
 
 const byId = (id) => document.getElementById(id);
 const ui = {
@@ -13,6 +14,10 @@ const ui = {
   controls: byId("controls-dialog"), openControls: byId("open-controls"), closeControls: byId("close-controls"),
   storageStart: byId("start-storage-story"), rawRecords: byId("raw-records"), allEvents: byId("all-events"),
   conversationForm: byId("conversation-form"), topic: byId("conversation-topic"), topicHelp: byId("conversation-topic-help"),
+  workflow: byId("workflow-picker"), workflowLegend: byId("workflow-legend"), workflowHelp: byId("workflow-help"),
+  workflowTitle: byId("overview-workflow-title"), workflowDescription: byId("overview-workflow-description"),
+  workflowChain: byId("overview-workflow-chain"), workflowDiscussion: byId("overview-workflow-discussion"),
+  overviewRoster: byId("overview-agents"),
   topicError: byId("conversation-topic-error"), conversationStart: byId("start-conversation"),
   conversationButton: byId("conversation-button-label"), conversationIcon: byId("conversation-icon"),
   conversationControl: byId("conversation-control-note"), model: byId("conversation-model"), roster: byId("agent-roster"),
@@ -80,6 +85,7 @@ const eventLabels = {
 };
 const readEvents = new Set(["database", "database_read", "checkpoint"]);
 const collator = new Intl.Collator("en", { numeric: true });
+const nameList = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
 const clock = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const recordNodes = new Map();
 const fileNodes = new Map();
@@ -123,6 +129,8 @@ let definitionRequest = null;
 let definitionView = null;
 const chatChapters = [...document.querySelectorAll("#conversation-rail > li")];
 const detailChoices = [...document.querySelectorAll('input[name="console-detail"]')];
+const workflowChoices = [...document.querySelectorAll('input[name="workflow"]')];
+let selectedWorkflow = "conversation.sequential";
 let detailMode = "overview";
 const DEFAULT_TOPIC = "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";
 let lastConversation = null;
@@ -182,6 +190,24 @@ function isConversation(value = state) {
 
 function conversationSnapshot() {
   return isConversation() ? state.conversation ?? lastConversation : null;
+}
+
+// A next-run choice never changes the topology or identity of a saved conversation.
+function displayedWorkflow() {
+  return isConversation() ? conversationWorkflow(conversationSnapshot(), state.run)
+    : { kind: selectedWorkflow, version: 1 };
+}
+
+function agentName(snapshot, id) {
+  return snapshot?.agents.find(agent => agent.id === id)?.name ?? DEFAULT_AGENTS.find(agent => agent.id === id)?.name ?? id;
+}
+
+function activeAgentNames(snapshot, turns) {
+  return nameList.format([...new Set(turns.map(turn => agentName(snapshot, turn.agent_id)))]);
+}
+
+function turnInputs(turn) {
+  return turn.input_ids.length ? `replies ${turn.input_ids.join(", ")}` : "saved topic";
 }
 
 function verifiedReplay() {
@@ -266,6 +292,7 @@ class RequestError extends Error {
   }
 }
 
+// Keep requests same-origin and validate observations before they enter the rendering state.
 async function requestJSON(path, { method = "GET", body = {}, token, signal, maxBytes } = {}) {
   const controller = new AbortController();
   let timedOut = false;
@@ -303,33 +330,14 @@ async function requestJSON(path, { method = "GET", body = {}, token, signal, max
   }
 }
 
-function validConversation(snapshot) {
-  const ids = (value) => Array.isArray(value) && value.every((id) => typeof id === "string");
-  if (snapshot == null) return true;
-  return snapshot.schema === "asmrt.conversation.v1" && typeof snapshot.topic === "string"
-    && typeof snapshot.model?.name === "string" && typeof snapshot.model.digest === "string"
-    && Array.isArray(snapshot.agents) && snapshot.agents.length === 4
-    && snapshot.agents.every((agent) => ["id", "name", "role", "prompt"].every((key) => typeof agent?.[key] === "string"))
-    && new Set(snapshot.agents.map((agent) => agent.id)).size === 4
-    && Number.isInteger(snapshot.rounds) && snapshot.rounds > 0
-    && Number.isInteger(snapshot.turns_total) && snapshot.turns_total > 0
-    && typeof snapshot.definition_file === "string" && typeof snapshot.definition_sha256 === "string"
-    && Array.isArray(snapshot.messages) && snapshot.messages.every((message) =>
-      message?.schema === "asmrt.chat.reply.v1"
-      && ["task_id", "agent_id", "agent_name", "model", "text"].every((key) => typeof message[key] === "string")
-      && ids(message.input_ids) && typeof message.committed === "boolean" && typeof message.reused === "boolean")
-    && new Set(snapshot.messages.map((message) => message.task_id)).size === snapshot.messages.length
-    && (snapshot.active == null || (typeof snapshot.active.task_id === "string" && typeof snapshot.active.agent_id === "string"
-      && ["assigned", "generating", "saved"].includes(snapshot.active.stage) && ids(snapshot.active.input_ids)));
-}
-
 function validateState(next) {
   const validTasks = Array.isArray(next?.tasks) && next.tasks.every((task) =>
     typeof task?.id === "string" && taskStates.has(task.state) && typeof task.attempt === "string"
     && task.record && typeof task.record === "object" && (task.published == null || typeof task.published === "boolean")
     && (task.definition == null || (typeof task.definition.reference === "string" && typeof task.definition.sha256 === "string")));
   const validEvents = Array.isArray(next?.events) && next.events.every((event) =>
-    event && typeof event.event === "string" && typeof event.sequence === "number" && typeof event.at === "string");
+    event && typeof event.event === "string" && typeof event.sequence === "number" && typeof event.at === "string"
+    && (event.task_ids == null || (Array.isArray(event.task_ids) && event.task_ids.every(id => typeof id === "string"))));
   const db = next?.database;
   const validDatabase = db == null || (Number.isSafeInteger(db.sequence) && typeof db.at === "string"
     && typeof db.launch_id === "string" && db.tool === "db_list" && Array.isArray(db.commands)
@@ -346,6 +354,7 @@ function validateState(next) {
   if (!next || !phases.has(next.phase) || typeof next.csrf_token !== "string" || !next.csrf_token
       || !validTasks || !validEvents || !validDatabase || !validPlayback || !validConversation(next.conversation)
       || (next.run !== null && typeof next.run?.id !== "string")
+      || (next.run?.workflow != null && !isConversationWorkflow(next.run.workflow))
       || new Set(next.tasks.map((task) => task.id)).size !== next.tasks.length) {
     throw new RequestError("The controller returned an incomplete or invalid state.", "invalid");
   }
@@ -400,6 +409,10 @@ function acceptState(next) {
     }
   }
   if (isConversation(next) && next.conversation) lastConversation = next.conversation;
+  if (isConversation(next) && (runChanged || activePhases.has(next.phase)
+    || ["playing", "paused"].includes(next.playback?.status))) {
+    selectedWorkflow = conversationWorkflow(next.conversation ?? lastConversation, next.run).kind;
+  }
   if (runChanged && isConversation(next)) {
     ui.topic.value = next.conversation?.topic ?? next.run.topic ?? ui.topic.value;
     ui.topic.removeAttribute("aria-invalid");
@@ -541,6 +554,13 @@ function renderConversationControls() {
   ui.conversationStart.disabled = busy || !actionAllowed(kind);
   attribute(ui.conversationStart, "data-action", kind);
   attribute(ui.conversationForm, "aria-busy", busy);
+  ui.workflow.disabled = busy || kind !== "conversation" || !actionAllowed("conversation");
+  for (const choice of workflowChoices) choice.checked = choice.value === selectedWorkflow;
+  text(ui.workflowLegend, isConversation() && ui.workflow.disabled ? "Saved demo" : "Demo for next run");
+  text(ui.workflowHelp, !connected ? "Waiting for the controller. No run is changed."
+    : ui.workflow.disabled ? "Reset demo to choose another. Saved files stay."
+      : isConversation() ? "Next run only. This saved conversation stays."
+        : "Choose a demo, then Start. Same local model.");
   text(ui.conversationButton, activeAction === "conversation" ? "Starting..." : activeAction === "pause" ? "Pausing..."
     : activeAction === "play" ? "Resuming..." : activeAction === "resume" ? "Reopening..."
       : kind === "pause" ? "Pause" : kind === "play" ? "Resume" : kind === "resume" ? "Reopen conversation"
@@ -553,14 +573,14 @@ function renderConversationControls() {
     : pizza ? "Eight short replies. A broken oven. A real process crash." : "1-400 characters. Eight replies, with a real crash halfway through.");
   let note = "One click. The rest is automatic.";
   if (!connected) note = state ? "Controller offline. Reconnecting..." : "Connecting to the local controller.";
-  else if (busy) note = activeAction === "pause" ? "Pausing. The current model call may finish first." : "Waiting for the controller.";
+  else if (busy) note = activeAction === "pause" ? "Pausing. In-flight model calls may finish first." : "Waiting for the controller.";
   else if (!isConversation() && workInFlight()) note = "Storage run active. Follow it below.";
   else if (!isConversation() && state.run) note = "Starts fresh. Previous run files are kept.";
   else if (kind === "pause") note = "Automatic playback. Pause for more reading time.";
   else if (kind === "play") note = state.playback.transitioning ? "Finishing the current operation." : "Paused. Resume continues this conversation.";
   else if (kind === "resume") note = "Reopen the saved jobs and replies.";
   else if (isConversation() && activePhases.has(state.phase)) note = "Runtime active. Waiting for its next checkpoint.";
-  else if (isConversation() && state.phase === "finished") note = "Try another mission. This run is kept.";
+  else if (isConversation() && state.phase === "finished") note = "Choose the next demo, or Reset to clear this view. This run is kept.";
   text(ui.conversationControl, note);
   attribute(ui.conversationControl, "data-essential", !connected || busy || (!isConversation() && workInFlight())
     || kind === "resume" || Boolean(state?.playback?.transitioning));
@@ -655,29 +675,31 @@ function renderConversationJobs(snapshot) {
   const messages = snapshot?.messages ?? [];
   text(ui.savedSummary, snapshot ? `${messages.length} disk-saved replies / ${messages.filter((message) => message.committed).length} asmDB-completed` : "Not observed yet");
   text(ui.savedTopic, snapshot?.topic ?? "Not read yet");
-  const workflow = snapshot?.workflow;
-  text(byId("conversation-workflow"), snapshot
-    ? `${workflow?.kind ?? "conversation.sequential"} / v${workflow?.version ?? 1}${workflow ? "" : " (legacy plan)"}`
+  const workflow = conversationWorkflow(snapshot, isConversation() ? state.run : null);
+  text(byId("conversation-workflow"), isConversation()
+    ? `${workflow.kind} / v${workflow.version}${snapshot?.workflow || state.run.workflow ? "" : " (legacy plan)"}`
     : "Not read yet");
   text(ui.definitionFile, snapshot?.definition_file ?? "Not read yet");
   text(ui.definitionHash, snapshot?.definition_sha256 ?? "Not read yet");
   text(ui.modelDigest, snapshot?.model.digest ?? "Not read yet");
 }
 
+// Track each reported branch independently; a saved reply is not a linear execution cursor.
 function renderConversation() {
   const current = isConversation();
   const snapshot = conversationSnapshot();
   const messages = snapshot?.messages ?? [];
-  const active = snapshot?.active;
+  const activeTurns = conversationActiveTurns(snapshot);
+  const discussion = displayedWorkflow().kind === "conversation.discussion";
   const playback = current ? state.playback : null;
   const liveProcess = hasLiveConversationProcess();
-  const generating = liveProcess && state.conversation?.active?.stage === "generating";
   const stopped = current && ["interrupted", "error", "stopping"].includes(state.phase);
   const retained = current && (!connected || !state.conversation || ["starting", "stopping", "interrupted", "error"].includes(state.phase));
+  const liveTurns = liveProcess && !retained ? conversationActiveTurns(state.conversation) : [];
+  const generating = liveTurns.some(turn => turn.stage === "generating");
   const total = snapshot?.turns_total ?? (current ? state.run.tasks : 8);
-  const activeAgent = snapshot?.agents.find((agent) => agent.id === active?.agent_id);
-  const activeTask = state?.tasks.find((task) => task.id === active?.task_id);
-  const hasRetry = activeTask && wasRetried(activeTask.attempt);
+  const retries = activeTurns.map(turn => ({ turn, task: state?.tasks.find(task => task.id === turn.task_id) }))
+    .filter(({ task }) => task && wasRetried(task.attempt));
   const scene = playback?.scene;
   if (current) {
     attribute(ui.stage, "data-focus", playback?.scene.focus ?? "");
@@ -691,12 +713,13 @@ function renderConversation() {
     text(agent.role, definition.role);
     attribute(agent.portrait, "aria-label", `${definition.name} robot portrait`);
     const replies = messages.filter((message) => message.agent_id === agent.id);
-    let status = !current ? "Ready" : "Waiting for turn";
+    let status = !current ? "Ready" : discussion ? "Waiting for dependencies" : "Waiting for turn";
     let key = "ready";
     if (replies.length) { status = `${replies.length} ${replies.length === 1 ? "reply" : "replies"} saved`; key = "saved"; }
-    if (active?.agent_id === agent.id && liveProcess && !retained) {
-      key = generating ? "generating" : active.stage;
-      status = generating ? `Generating turn ${active.task_id}` : active.stage === "saved" ? "Reply saved, completing" : `Turn ${active.task_id} assigned`;
+    const active = liveTurns.find(turn => turn.agent_id === agent.id);
+    if (active) {
+      key = active.stage;
+      status = active.stage === "generating" ? `Generating turn ${active.task_id}` : active.stage === "saved" ? "Reply saved, completing" : `Turn ${active.task_id} assigned`;
     }
     if (current && state.phase === "starting") { status = "Opening saved jobs"; key = "waiting"; }
     if (current && state.phase === "finished") { status = verifiedReplay() ? "No new model call" : "Finished"; key = "finished"; }
@@ -707,8 +730,11 @@ function renderConversation() {
   }
   const pizza = (snapshot?.topic ?? ui.topic.value.trim()) === DEFAULT_TOPIC;
   text(ui.conversationTitle, scene?.title ?? (stopped ? "Conversation stopped" : current ? "Opening saved work" : pizza ? "Can they save pizza night?" : "The team has a mission."));
-  text(ui.conversationDescription, scene?.description ?? (current ? "Reading saved jobs and replies from this run." : "Four roles, one local model. Each agent reads the previous replies."));
-  text(ui.conversationTurn, `${current ? active?.task_id ?? messages.length : 0} / ${total}`);
+  text(ui.conversationDescription, scene?.description ?? (current ? "Reading saved jobs and replies from this run."
+    : discussion ? "Planner seeds the debate. Builder, Critic and Editor exchange in parallel rounds, then Editor synthesizes. Each round waits for all three replies."
+      : "Four roles, one local model. Each agent reads the previous replies."));
+  text(ui.conversationTurn, discussion ? `${messages.length} / ${total} saved${liveTurns.length ? ` · ${liveTurns.length} active` : ""}`
+    : `${current ? activeTurns[0]?.task_id ?? messages.length : 0} / ${total}`);
   text(ui.conversationRuntime, !current ? "Not started" : !connected ? "Process unconfirmed" : state.phase === "stopping" ? "Stopping Rust" : stopped ? "Rust stopped"
     : state.phase === "starting" ? "Opening runtime" : state.phase === "finished" ? "Rust finished"
       : liveProcess ? `${playback?.status === "paused" ? "Paused" : "Running"}${detailMode === "deep" ? ` / PID ${state.pid}` : ""}` : "Awaiting runtime");
@@ -728,12 +754,13 @@ function renderConversation() {
     if (!connected) activity = "Disconnected. Live activity cannot be confirmed.";
     else if (state.phase === "stopping") activity = "Stopping Rust. Saved replies stay visible.";
     else if (stopped) activity = "Process stopped. Showing the last observed replies.";
-    else if (generating) activity = `${activeAgent?.name ?? active.agent_id} is replying to ${active.input_ids.length} saved messages...`;
     else if (state.phase === "starting" || !state.conversation) activity = "Reading saved instructions and conversation history...";
     else if (verifiedReplay()) activity = "Reopened and checked. No new model calls.";
+    else if (liveTurns.length) {
+      activity = liveTurns.map(turn => `${agentName(snapshot, turn.agent_id)}: turn ${turn.task_id} ${turn.stage}; input ${turnInputs(turn)}`).join(" · ");
+      if (discussion && generating) activity += ". Debate requests launch together; the local provider may queue inference.";
+    }
     else if (playback?.status === "paused") activity = "Paused. Take your time; saved replies stay here.";
-    else if (active?.stage === "saved") activity = `Turn ${active.task_id} saved. Next: commit its hash in asmDB.`;
-    else if (active?.stage === "assigned") activity = `Turn ${active.task_id} assigned. Model call not started.`;
     else if (state.phase === "finished") activity = playback?.status === "playing" ? "All replies saved. Next: restart and verify." : "Conversation finished. All replies are on disk.";
     else activity = "Waiting for the next runtime event.";
   }
@@ -746,9 +773,9 @@ function renderConversation() {
   text(ui.conversationEmpty.querySelector("h3"), emptyTitle);
   text(ui.conversationEmpty.querySelector("p"), !current ? "Press Start conversation. Watch the agents talk while asmDB keeps their work."
     : stopped ? "Reopen to read the saved jobs." : "Waiting for a complete local-model reply. Nothing is prewritten.");
-  ui.recovery.hidden = !current || !(stopped || hasRetry || (state.phase === "starting" && messages.length));
+  ui.recovery.hidden = !current || !(stopped || retries.length || (state.phase === "starting" && messages.length));
   text(ui.recoveryNote, stopped ? `${messages.length} replies retained on screen. Reopening will verify them from disk.`
-    : hasRetry ? `Turn ${active.task_id}, attempt ${activeTask.attempt}. Same saved job, ${active.input_ids.length} prior replies.`
+    : retries.length ? retries.map(({ turn, task }) => `Turn ${turn.task_id}, attempt ${task.attempt}. Same saved job; input ${turnInputs(turn)}.`).join(" ")
       : "Rereading the saved jobs and replies, not starting over.");
   ui.conversationVerified.hidden = !current || !verifiedReplay();
   text(ui.conversationReused, current && verifiedReplay() ? `${messages.length} replies checked from disk` : "");
@@ -761,8 +788,13 @@ function renderOverview() {
   const snapshot = conversationSnapshot();
   const messages = snapshot?.messages ?? [];
   const total = snapshot?.turns_total ?? (current ? state.run.tasks : 8);
-  const active = snapshot?.active;
-  const generating = hasLiveConversationProcess() && state.conversation?.active?.stage === "generating";
+  const workflow = displayedWorkflow();
+  const discussion = workflow.kind === "conversation.discussion";
+  const rounds = snapshot?.rounds ?? (current ? state.run.rounds : null) ?? 2;
+  const liveTurns = hasLiveConversationProcess() && state.conversation ? conversationActiveTurns(state.conversation) : [];
+  const generatingTurns = liveTurns.filter(turn => turn.stage === "generating");
+  const savedTurns = liveTurns.filter(turn => turn.stage === "saved");
+  const assignedTurns = liveTurns.filter(turn => turn.stage === "assigned");
   const latestLaunch = currentProcessEvents().find(event => event.event === "launching");
   const awaitingNativeRead = Boolean(state?.database && latestLaunch && Date.parse(state.database.at) < Date.parse(latestLaunch.at));
   const retained = current && (!connected || !state.conversation || awaitingNativeRead || ["starting", "stopping", "interrupted", "error"].includes(state.phase));
@@ -772,11 +804,20 @@ function renderOverview() {
   let index = messages.findIndex(message => message.task_id === selectedOverviewReply);
   if (index < 0) { selectedOverviewReply = null; index = messages.length - 1; }
   const message = messages[index];
-  const activeAgent = snapshot?.agents.find(agent => agent.id === active?.agent_id);
   const scene = current ? state.playback?.scene.id : null;
   const chapter = conversationChapter(scene, current ? state.tasks : []);
   const verified = current && verifiedReplay();
 
+  const topology = discussion
+    ? `Planner seed → Builder / Critic / Editor in parallel × ${rounds} shared ${rounds === 1 ? "round" : "rounds"} → Editor synthesis.`
+    : `Planner → Builder → Critic → Editor · ${rounds} ${rounds === 1 ? "round" : "rounds"}, one role at a time.`;
+  text(ui.workflowTitle, `${discussion ? "Discussion" : "Relay"} · ${current ? "saved run" : "next run"}`);
+  text(ui.workflowDescription, topology);
+  ui.workflowChain.toggleAttribute("hidden", discussion);
+  ui.workflowDiscussion.toggleAttribute("hidden", !discussion);
+  attribute(ui.overviewRoster, "data-workflow", workflow.kind);
+  attribute(ui.overviewRoster, "aria-label", topology);
+  attribute(ui.roster, "aria-label", topology);
   text(ui.overviewTitle, pizza ? "Can they save pizza night?" : "The team has a mission.");
   text(ui.overviewTopic, pizza ? "Eight friends. $40. One oven." : topic || "Give the team a problem in Details.");
   let status = "Ready when you are.";
@@ -787,25 +828,29 @@ function renderOverview() {
     else if (state.phase === "interrupted") status = "Runtime stopped. Memory stays.";
     else if (state.phase === "starting" || !state.conversation) status = "Reading saved work...";
     else if (verified) status = "Replay verified.";
-    else if (generating) status = `${activeAgent?.name ?? active.agent_id} is thinking...`;
+    else if (generatingTurns.length) status = `${activeAgentNames(snapshot, generatingTurns)} ${generatingTurns.length === 1 ? "is" : "are"} thinking...`;
     else if (state.playback?.status === "paused") status = "Paused. Take your time.";
     else if (state.phase === "finished") status = state.playback?.status === "playing" ? "Checking what survived..." : "Conversation finished.";
     else if (scene === "chat-crash-next") status = "Next up: a real process crash.";
-    else if (active?.stage === "saved") status = `${activeAgent?.name ?? active.agent_id}'s reply is saved.`;
-    else if (active?.stage === "assigned") status = `${activeAgent?.name ?? active.agent_id} is up next.`;
-    else status = "Passing the conversation along.";
+    else if (savedTurns.length) status = `${activeAgentNames(snapshot, savedTurns)}: ${savedTurns.length === 1 ? "reply" : "replies"} saved.`;
+    else if (assignedTurns.length) status = `${activeAgentNames(snapshot, assignedTurns)}: assigned.`;
+    else status = discussion ? "Waiting for the next round or synthesis." : "Passing the conversation along.";
   }
   text(ui.overviewStatus, status);
   attribute(ui.overview, "data-retained", retained);
   for (const agent of overviewAgents) {
     const definition = snapshot?.agents.find(item => item.id === agent.id) ?? DEFAULT_AGENTS.find(item => item.id === agent.id);
-    const thinking = generating && active?.agent_id === agent.id;
+    const active = liveTurns.find(turn => turn.agent_id === agent.id);
+    const thinking = active?.stage === "generating";
     const selected = message?.agent_id === agent.id;
     text(agent.name, definition.name);
-    text(agent.status, thinking ? "Thinking..." : selected ? index === messages.length - 1 ? "Latest reply" : `Reply ${message.task_id}` : "");
+    text(agent.status, thinking ? "Thinking..." : active?.stage === "assigned" ? "Assigned" : active?.stage === "saved" ? "Reply saved"
+      : selected ? index === messages.length - 1 ? "Latest reply" : `Reply ${message.task_id}` : "");
+    attribute(agent.root, "data-active", Boolean(active));
     attribute(agent.root, "data-thinking", thinking);
     attribute(agent.root, "data-selected", selected);
   }
+  // Reuse every reply node and exact text; polling never collapses the transcript or steals its focus.
   const scroll = ui.overviewReplyScroll;
   const previousLatest = ui.overviewMessages.lastElementChild?.dataset.replyId;
   const follow = selectedOverviewReply === null && !scroll.contains(document.activeElement)
@@ -857,7 +902,7 @@ function renderOverview() {
     text(entry.mark, marks[cell.status]);
     attribute(entry.button, "data-state", cell.status);
     attribute(entry.button, "aria-pressed", Boolean(message && cell.id === message.task_id));
-    attribute(entry.button, "aria-label", `Turn ${cell.id}. ${labels[cell.status]}.${cell.message ? ` Read ${cell.message.agent_name}'s reply.` : ""}`);
+    attribute(entry.button, "aria-label", `Turn ${cell.id}.${cell.agent_id ? ` ${agentName(snapshot, cell.agent_id)}.` : ""} ${labels[cell.status]}.${cell.message ? ` Read ${cell.message.agent_name}'s reply.` : ""}`);
     return entry.root;
   });
   reconcileChildren(ui.memoryCells, nodes);
@@ -1375,7 +1420,8 @@ function newEventNode(event) {
   const label = element("span", "event-label", eventLabels[event.event] ?? event.event);
   label.title = event.event;
   const context = element("span", "event-context");
-  if (event.task_id) context.append(element("code", "", `${isConversation() ? "turn" : "task"} ${event.task_id}`));
+  if (event.task_ids?.length) context.append(element("code", "", `${isConversation() ? "turns" : "tasks"} ${event.task_ids.join(", ")}`));
+  else if (event.task_id) context.append(element("code", "", `${isConversation() ? "turn" : "task"} ${event.task_id}`));
   if (event.owner || event.agent_id) context.append(element("code", "", event.owner ?? event.agent_id));
   if (event.attempt != null) context.append(element("span", "event-detail", `attempt ${event.attempt}`));
   if (event.pid != null) context.append(element("code", "event-detail", `PID ${event.pid}`));
@@ -1413,7 +1459,7 @@ function renderSources() {
   text(ui.sourceBridge, state?.source?.bridge ?? "Not reported");
   text(ui.sourceMode, state?.source?.mode ?? "Not reported");
   text(ui.sourceDirectory, state?.run?.directory ?? "No run");
-  text(ui.sourceRun, isConversation() ? `${state.run.id}: ${state.run.tasks} sequential turns, 4 roles, one shared ${state.run.model} model`
+  text(ui.sourceRun, isConversation() ? `${state.run.id}: ${state.run.tasks} ${displayedWorkflow().kind === "conversation.discussion" ? "discussion turns with parallel debate rounds" : "sequential turns"}, 4 roles, one shared ${state.run.model} model`
     : state?.run ? `${state.run.id}: ${state.run.tasks} tasks, ${state.run.workers} workers, ${state.run.work_ms} ms teaching delay` : "No run");
 }
 
@@ -1440,6 +1486,7 @@ function bindCommand(button, callback) {
   button.addEventListener("keydown", (event) => { if (event.repeat && ["Enter", " "].includes(event.key)) event.preventDefault(); });
 }
 
+// Native controls preserve keyboard behavior; only explicit commands can start, resume or reset a run.
 ui.openControls.addEventListener("click", () => { ui.controls.showModal(); ui.closeControls.focus({ preventScroll: true }); });
 ui.closeControls.addEventListener("click", () => ui.controls.close());
 ui.controls.addEventListener("close", () => ui.openControls.focus({ preventScroll: true }));
@@ -1479,7 +1526,15 @@ ui.conversationForm.addEventListener("submit", (event) => {
     text(ui.topicError, valid ? "" : "Enter a topic from 1 to 400 characters.");
     if (!valid) { selectDetail("deep"); ui.topic.focus(); return; }
   }
-  void performAction(kind, kind === "conversation" ? { topic } : {});
+  if (kind === "conversation" && !isConversationWorkflow(selectedWorkflow)) return;
+  void performAction(kind, kind === "conversation" ? { topic, workflow: selectedWorkflow } : {});
+});
+for (const choice of workflowChoices) choice.addEventListener("change", () => {
+  if (!choice.checked || ui.workflow.disabled || !isConversationWorkflow(choice.value)) return;
+  selectedWorkflow = choice.value;
+  renderConversationControls();
+  renderConversation();
+  renderOverview();
 });
 ui.topic.addEventListener("input", () => { ui.topic.removeAttribute("aria-invalid"); ui.topicError.hidden = true; renderConversationControls(); renderConversation(); renderOverview(); });
 bindCommand(ui.play, () => { void performAction(primaryAction()); });

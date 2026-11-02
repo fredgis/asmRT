@@ -1,5 +1,8 @@
+//! Exercises task-record round trips, byte limits, and invalid-state rejection.
+
 use asmrt::{Record, Task, TaskState};
 
+// Decode hand-built rows so constructor validation cannot hide wire-format defects.
 #[test]
 fn compact_records_preserve_full_integer_precision_and_utf8_references() {
     let record = Record {
@@ -35,6 +38,7 @@ fn content_budget_counts_utf8_bytes_and_json_escape_overhead() {
     }
 }
 
+// Definition-bearing v2 records and definition-free v1 records must stay distinct.
 #[test]
 fn typed_records_bind_a_complete_definition_without_changing_legacy_records() {
     let reference = asmrt::DefinitionRef::new("job:1", "a".repeat(64)).unwrap();

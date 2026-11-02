@@ -5,7 +5,7 @@ flowchart TB
         UI <-->|"HTTP commands + state polling"| CTRL
     end
     subgraph RUST["One Rust process"]
-        H["Known handlers<br>sequential chat turns or concurrent demo workers"]
+        H["Known handlers<br>sequential turns · parallel debate · demo workers"]
         A["State Actor<br>64-request mailbox · acknowledged task index"]
         C["Native task codec<br>state · attempt · owner · references"]
         M["MCP client<br>one request at a time"]
