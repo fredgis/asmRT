@@ -1,111 +1,70 @@
 <div align="center">
-  <img src="Docs/assets/asmrt-banner.png" alt="asmRT — durable coordination over asmDB" width="100%">
+  <img src="Docs/assets/asmrt-banner.png" alt="asmRT: durable coordination over asmDB" width="100%">
   <h1>asmRT</h1>
   <p><strong>Agents stop. Work survives.</strong></p>
 </div>
 
-A **Rust runtime prototype over [asmDB](https://github.com/fredgis/asmDB)**. Four agents have a real local-model conversation. Kill Rust halfway through; restart it; they continue from saved instructions and replies.
+asmRT is a Rust runtime for recoverable agent workflows, built on **[asmDB, the assembly database](https://github.com/fredgis/asmDB)**.
 
-**[asmDB — the assembly database behind asmRT →](https://github.com/fredgis/asmDB)**
+A transcript tells you what an agent said. Continuing after a crash also requires knowing which instructions it received, which replies it used, and whether its work was committed. asmRT saves that execution context so the next process can determine what remains to run.
 
-**Local POC · Windows x86-64 verified · asmDB unchanged · no cloud key**
+The goal is a small, inspectable execution layer for agents whose work needs to outlive a process. Today's prototype demonstrates that with a real local-model conversation and an actual crash.
 
-![The wide console: agent conversation beside actual asmDB records, with live events underneath](Docs/assets/screenshots/conversation.png)
+![Overview: four agents, an actual saved reply and graphical asmDB memory](Docs/assets/screenshots/conversation.png)
 
-## Run it
+## What actually runs
 
-You need **Rust/Cargo and its native linker**, **Node.js**, a built **asmDB** checkout with its MCP dependencies installed, and **Ollama running locally**. Follow [asmDB's setup](https://github.com/fredgis/asmDB) for the sibling checkout.
+Rust uses **asmDB's existing MCP/stdio bridge** to read and update durable task state. The assembly engine stays unchanged. Full instructions and replies live in files alongside the database.
+
+The demo calls **`qwen3.5:0.8b` through local Ollama**. One model serves four roles: Planner, Builder, Critic and Editor. Replies are generated, not scripted; no cloud API key is required. The small model can make mistakes. The demonstration is about recovering work, not proving the quality of its dinner advice.
+
+## See recovery happen
+
+The agents plan pizza night for eight friends on $40. In round two, the oven breaks. The controller kills the Rust process before turn 5 makes its model call, then restarts it.
+
+Replies 1–4 survive. Turn 5 retries and the conversation continues. A final replay reports `completed_now = 0` and `model_calls_now = 0`: completed work did not run again.
+
+**Overview** keeps the story playful: large robots, a speech bubble and visual memory. Browse saved replies with the arrows or memory tiles; **Follow latest** returns to the current reply. A check means the native database reported completion, not merely that a reply file exists.
+
+**Details** shows the full conversation beside asmDB, with an event dock below them. Inspect the saved instructions, attempts and replies. [See the technical console and recovery evidence](Docs/ARCHITECTURE.md#7-browser-controller-and-observable-evidence).
+
+## Run the demo
+
+Verified on Windows x86-64. You need Rust/Cargo with its native linker, Node.js, a built [asmDB checkout with MCP dependencies](https://github.com/fredgis/asmDB), and Ollama running locally. The example assumes sibling `repo-asmrt` and `repo-asmdb` folders.
 
 ```powershell
 Set-Location "$HOME\repo-asmrt"
 ollama pull qwen3.5:0.8b
 & .\scripts\visualize.ps1 -AsmdbDir "$HOME\repo-asmdb"
-# Open http://127.0.0.1:8787
 ```
 
-Click **Start conversation** once. Everything advances automatically; the same button pauses and resumes. Keep the controller terminal open.
+Open **http://127.0.0.1:8787** and click **Start conversation**. The same button pauses and resumes. Keep the controller terminal open.
 
-One `qwen3.5:0.8b` model (about **1.3 GB** for the tested Ollama package) serves **Planner, Builder, Critic and Editor** sequentially. These are four roles, not four copies of the model. Replies are genuine, not scripted; the small model can still make mistakes.
+**Reset demo** stops the runtime and clears the view after confirmation. It preserves old run folders and waits for you to start a fresh run. To change the mission, reset, edit it in Details, then start. Refreshing or switching views does not restart the conversation. Pause holds future steps; an inference already running finishes at its next checkpoint.
 
-## The demo: save pizza night
+## Workflow 1: sequential conversation
 
-1. **Talk:** eight friends, $40, one oven. Four agents agree on dinner and split the jobs.
-2. **Complication:** the oven breaks. That update is already in the saved second-round instructions.
-3. **Crash:** turn 5 is claimed, then the controller kills the **actual Rust process**, before its model call.
-4. **Recover:** a new process verifies replies 1–4 and retries only turn 5 at attempt 2. The conversation continues.
-5. **Verify:** one final restart reports **`completed_now = 0`** and **`model_calls_now = 0`**.
-
-The prompts request short replies. Each saved reply stays on screen for at least 6.5 seconds; inference time varies. Custom topics work too, without the pizza-specific twist.
-
-![Actual stopped Rust process, retained replies and native records before recovery](Docs/assets/screenshots/recovery.png)
-
-### Reading the console
-
-- **Overview** opens first: large agent portraits, full replies on the left, compact asmDB records on the right.
-- **Deep dive** keeps the same two panes and adds attempts, inputs, timings and hashes. **Raw fields** shows exact bridge-decoded values.
-- **Live events, below:** runtime/controller observations, always visible on desktop. This is **not CDC**.
-- **Select saved work** to inspect its job and JSON; Deep dive also has per-reply inspector buttons. **Controls & files** holds manual controls and the no-LLM storage demo.
-
-Switching views is local and remembers your preference. It does not restart or advance the conversation.
-
-![Deep dive: the same real paused conversation with technical details exposed](Docs/assets/screenshots/deep-dive.png)
-
-Conversation and records scroll independently. On narrow screens the panes stack. Refreshing the browser does not restart the run. Pausing holds future steps; it does not cancel an inference request already running.
-
-### First workflow: sequential conversation
-
-**`conversation.sequential`, version 1:** Planner → Builder → Critic → Editor, repeated for each round. Rust gives each role **all earlier saved replies**, then saves and commits its response before the next turn. Agents do not fetch messages independently; one runtime orchestrates one model call at a time. Parallel and conditional workflows are not implemented yet. See the [workflow contract](Docs/WORKFLOWS.md).
-
-## How does it know what to resume?
-
-**Not from status alone.** Each turn has a versioned job containing its instructions, agent role, model settings and previous-reply IDs. Rust reloads that job and calls its known handler.
-
-| Native field | Meaning |
-| --- | --- |
-| `ID` | Task / conversation turn |
-| `VALUE` | Attempt: 0 before claim, 1 on first claim, 2 after retry |
-| `TAG` | `asmrt.v2.pending`, `.running` or `.completed` |
-| `CONTENT` | Compact references: `o` owner, `d` job, `h` job SHA-256, `r` reply-file SHA-256 |
-
-Each native record is **256 bytes**. Full instructions and replies live in external JSON, not in its 175-byte content field.
+`conversation.sequential`, version `1`:
 
 ```text
-.asmrt\visual\<run-id>\
-  conversation.json       topic, roles, model and turn plan
-  definitions\<id>.json   executable job and input references
-  artifacts\<id>.json     real reply, input hashes and request provenance
-  asmrt.dat / .wal / .cdc native coordination state
+Planner → Builder → Critic → Editor
+          two rounds by default
 ```
 
-**Keep the whole run directory.** New runs preserve previous folders. Saved settings are immutable; start a new run to change the mission or model.
+Rust supplies each turn with **all earlier committed replies** and runs one model call at a time. It saves and commits the reply before advancing. The agents do not poll a message bus; the runtime provides their context. The browser controller only paces the demo.
 
-![Inspector showing the persisted job, its prior inputs and the actual saved reply](Docs/assets/screenshots/saved-job.png)
+This is the first agent-workflow contract. Its version is separate from job-handler versions. [Read the ordering and recovery rules](Docs/WORKFLOWS.md).
 
-## Architecture and guarantees
+## Product direction
 
-```text
-Rust handlers → State Actor → existing MCP/stdio bridge → unchanged asmDB
-      │
-      ├─ local Ollama inference
-      └─ durable job and reply files
-```
+The ambition is to make recoverable execution reusable beyond this conversation: longer-running agent jobs, additional model and tool handlers, and explicit workflow types for parallel branches or conditional routing. These are future directions, not implemented capabilities. Each new type will need its own rules for context, completion and recovery.
 
-One State Actor serializes task transitions through **one writer per database**. Jobs are saved before their references; replies are saved before completion. Reopening requeues interrupted assignments, validates saved work and leaves completed turns intact.
+The prototype currently recovers known jobs in one local runtime. A valid saved reply can be reused; inference lost before publication may run again. It does not promise exactly-once external effects, distributed orchestration or faster LLM inference. FFI and a CDC follower are not shipped.
 
-- Recovery restores **known jobs**, not process memory or arbitrary code.
-- A matching saved-but-uncommitted reply can be reused. Inference lost **before publication** may run again.
-- This is **not exactly-once external effects**, a power-loss certification or a performance benchmark.
-- No FFI integration, distributed leases, CDC follower, cloud adapter or autonomous tool execution is shipped.
+Back up the whole run directory, including the database, instructions and reply files. The [detailed architecture](Docs/ARCHITECTURE.md) explains the persistence boundaries and limitations; [CONTEXT.md](CONTEXT.md) defines the project vocabulary.
 
-**[Detailed architecture →](Docs/ARCHITECTURE.md)** — process boundaries, record codec, APIs, crash points, persistence guarantees, operations, tests and roadmap. Older concept artwork is retained there and explicitly separated from implemented features.
+## Contribute
 
-## Tests
+Bug reports, recovery tests and focused improvements are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and pull requests.
 
-```powershell
-$env:ASMRT_ASMDB_REPO = "$HOME\repo-asmdb"
-& .\scripts\cargo.ps1 test --locked --quiet
-& .\scripts\cargo.ps1 test --locked --quiet '--' --ignored --test-threads=1
-node --test .\visualizer\test\*.test.mjs
-```
-
-The Node integration tests use real Rust and asmDB with a **test-only** local model fixture. The application has no canned-response fallback. The screenshots above were captured from the running demo with real Ollama replies.
+asmRT is licensed under **[MIT](LICENSE)**. asmDB, model weights and other dependencies retain their own licenses.

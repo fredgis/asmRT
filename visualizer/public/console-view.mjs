@@ -19,6 +19,26 @@ export function nativeRecordFields(row, raw = false, detail = 'deep') {
   };
 }
 
+export function conversationMemory(snapshot, database, total = 8) {
+  const replies = new Map((snapshot?.messages ?? []).map(message => [message.task_id, message]));
+  const rows = new Map((database?.rows ?? []).map(row => [row.id, row]));
+  return Array.from({ length: total }, (_, index) => {
+    const id = String(index + 1);
+    const message = replies.get(id);
+    const row = rows.get(id);
+    let nativeState = /^asmrt\.v2\.(pending|running|completed)$/.exec(row?.tag)?.[1];
+    if (nativeState) {
+      let refs;
+      try { refs = JSON.parse(row.content); } catch { /* Unrecognized data stays in Details. */ }
+      if (refs?.d !== `job:${id}` || !/^[a-f0-9]{64}$/.test(refs?.h ?? '')
+        || (nativeState === 'completed' && !/^[a-f0-9]{64}$/.test(refs?.r ?? ''))) nativeState = undefined;
+    }
+    const status = row && !nativeState ? 'unknown' : nativeState === 'completed' ? 'committed'
+      : message ? 'saved' : nativeState === 'running' ? 'assigned' : nativeState === 'pending' ? 'waiting' : 'unobserved';
+    return { id, status, message };
+  });
+}
+
 export function conversationChapter(scene, tasks = []) {
   if (!scene) return -1;
   if (['chat-verified', 'chat-completed'].includes(scene)) return 3;

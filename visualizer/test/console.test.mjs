@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { nativeRecordFields, conversationChapter } from '../public/console-view.mjs';
+import { nativeRecordFields, conversationChapter, conversationMemory } from '../public/console-view.mjs';
 
 const row = { id: '9007199254740993', value: '2', tag: 'asmrt.v2.completed', content: JSON.stringify({ o: 'planner', d: 'job:5', h: 'a'.repeat(64), r: 'b'.repeat(64) }) };
 
@@ -28,6 +28,36 @@ test('unknown or malformed records remain exact rather than acquiring invented r
       assert.equal(result.content, input.content);
       assert.equal(result.hashes, '');
     }
+  }
+});
+
+test('graphical memory separates published replies from native completion and preserves exact text', () => {
+  const messages = [
+    { task_id: '1', committed: true, text: 'A real reply.\nKept verbatim.' },
+    { task_id: '2', committed: true, text: 'New reply; database listing is still older.' },
+  ];
+  const native = (id, state) => ({ id, tag: `asmrt.v2.${state}`, content: JSON.stringify({ d: `job:${id}`, h: 'a'.repeat(64), ...(state === 'completed' ? { r: 'b'.repeat(64) } : {}) }) });
+  const database = { rows: [native('3', 'pending'), native('1', 'completed'), native('2', 'running')] };
+  const before = JSON.stringify({ messages, database });
+  const cells = conversationMemory({ messages }, database, 4);
+  assert.deepEqual(cells.map(cell => cell.status), ['committed', 'saved', 'waiting', 'unobserved']);
+  assert.strictEqual(cells[0].message, messages[0]);
+  assert.equal(cells[1].message.text, messages[1].text);
+  assert.equal(JSON.stringify({ messages, database }), before);
+  assert.deepEqual(conversationMemory(null, null, 4).map(cell => cell.status), Array(4).fill('unobserved'));
+});
+
+test('graphical memory never turns an unknown or malformed native record into a successful commit', () => {
+  const message = { task_id: '1', text: 'Saved on disk.', committed: true };
+  for (const record of [
+    { tag: 'other.completed', content: '{}' },
+    { tag: 'asmrt.v2.completed', content: 'invalid' },
+    { tag: 'asmrt.v2.completed', content: 'null' },
+    { tag: 'asmrt.v2.completed', content: JSON.stringify({ d: 'job:1', h: 'a'.repeat(64) }) },
+  ]) {
+    const [cell] = conversationMemory({ messages: [message] }, { rows: [{ id: '1', ...record }] }, 1);
+    assert.equal(cell.status, 'unknown');
+    assert.strictEqual(cell.message, message);
   }
 });
 

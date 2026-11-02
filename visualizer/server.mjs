@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { lstat, mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -344,6 +344,32 @@ export async function createVisualizer({
     await deadline(childClosed, 15000);
   }
 
+  async function resetDemo() {
+    cancelCue();
+    if (playback) playback.status = 'paused';
+    if (child) { child.interrupt(); await deadline(childClosed, 15000); }
+    // Forget only the selection; saved databases, definitions and replies stay untouched.
+    try { await unlink(manifest); }
+    catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
+    run = null;
+    phase = 'idle';
+    tasks.clear();
+    events = [];
+    sequence = 0;
+    summary = null;
+    checkpoint = null;
+    launchId = null;
+    checkpointSequence = 0;
+    database = null;
+    conversation = null;
+    databaseSequence = 0;
+    playback = null;
+    cueRemaining = 0;
+    cueAction = null;
+    sceneKey = null;
+    error = null;
+  }
+
   async function runCue(expected) {
     // A cancelled timer must never affect a later checkpoint, launch or run.
     if (closing || expected.generation !== cueGeneration || expected.run !== run?.id
@@ -535,7 +561,7 @@ export async function createVisualizer({
         }
         return send(response, 200, { task_id: definition[1], filename, sha256: reference.sha256, content: JSON.parse(bytes.toString('utf8')) });
       }
-      if (request.method !== 'POST' || !['/api/run', '/api/resume', '/api/interrupt', '/api/next', '/api/play', '/api/pause', '/api/conversation', '/api/storage'].includes(route)) throw new HttpError(404, 'Unknown route.');
+      if (request.method !== 'POST' || !['/api/run', '/api/resume', '/api/interrupt', '/api/next', '/api/play', '/api/pause', '/api/conversation', '/api/storage', '/api/reset'].includes(route)) throw new HttpError(404, 'Unknown route.');
       if (request.headers.origin !== url || request.headers['x-asmrt-token'] !== token) {
         throw new HttpError(403, 'Commands are only allowed from this local view.');
       }
@@ -550,7 +576,10 @@ export async function createVisualizer({
       if (changing) throw new HttpError(409, 'Another command is in progress.');
       changing = true;
       try {
-        if (route === '/api/conversation') {
+        if (route === '/api/reset') {
+          requireEmptyBody(body);
+          await resetDemo();
+        } else if (route === '/api/conversation') {
           if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting another conversation.');
           let settings;
           try { settings = conversationOptions(body); }

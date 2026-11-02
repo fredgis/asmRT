@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { get } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -130,6 +131,42 @@ test('pausing freezes the cue, holds an in-flight operation at its next checkpoi
   assert.equal(finished.summary.retried, 0);
 });
 
+test('reset waits for owned-process cleanup, rejects overlapping commands and cancels old cues', { skip: !asmdbDir }, async t => {
+  const { state, post } = await fixture(t, { storySceneMs: 450 });
+  const idle = await state();
+  assert.equal((await post('play')).status, 202);
+  const playing = await until(state, s => s.phase === 'paused', 'no armed story checkpoint');
+  assert.equal(playing.playback.status, 'playing');
+  const kill = ChildProcess.prototype.kill;
+  let held;
+  // Hold only this fixture's OS stop to make the command-conflict window deterministic.
+  const stop = t.mock.method(ChildProcess.prototype, 'kill', function(signal) {
+    if (this.pid !== playing.pid) return kill.call(this, signal);
+    held = { child: this, signal };
+    return true;
+  });
+  const resetting = post('reset');
+  let response;
+  try {
+    const stopping = await until(state, s => s.phase === 'stopping', 'reset did not await its owned process');
+    assert.equal(stopping.pid, playing.pid);
+    for (const [action, body] of [['reset', {}], ['run', { tasks: 4, work_ms: 0 }]]) {
+      const conflict = await post(action, body);
+      assert.equal(conflict.status, 409);
+      assert.deepEqual(await conflict.json(), { error: 'Another command is in progress.' });
+    }
+  } finally {
+    stop.mock.restore();
+    if (held) kill.call(held.child, held.signal);
+    response = await resetting;
+  }
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), idle);
+  assert.throws(() => process.kill(playing.pid, 0), { code: 'ESRCH' });
+  await delay(750);
+  assert.deepEqual(await state(), idle, 'the old cue must not reopen or advance a run after reset');
+});
+
 test('an early story restart reports the real completed count and reuses uncommitted files', { skip: !asmdbDir }, async t => {
   const { state, post, restart } = await fixture(t, { storySceneMs: 450 });
   assert.equal((await post('play')).status, 202);
@@ -200,18 +237,20 @@ test('restarting the viewer retains its run and rereads durable state without re
   assert.equal(resumed.run.id, finished.run.id);
 });
 
-test('foreign and malformed commands cannot launch a process or select a filesystem path', { skip: !asmdbDir }, async t => {
+test('commands preserve local authorization and input validation; idle reset is idempotent', { skip: !asmdbDir }, async t => {
   const { server, dataRoot, state, post } = await fixture(t);
   const snapshot = await state();
   for (const headers of [
     { Origin: 'https://unrelated.example', 'X-Asmrt-Token': snapshot.csrf_token },
     { Origin: server.url, 'X-Asmrt-Token': 'wrong-token' },
   ]) {
-    const response = await fetch(`${server.url}/api/run`, {
-      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: 4, work_ms: 0 }),
-    });
-    assert.equal(response.status, 403);
+    for (const action of ['run', 'reset']) {
+      const response = await fetch(`${server.url}/api/${action}`, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(action === 'run' ? { tasks: 4, work_ms: 0 } : {}),
+      });
+      assert.equal(response.status, 403);
+    }
   }
   const rejectedHost = await new Promise((resolve, reject) => {
     get(`${server.url}/api/state`, { headers: { Host: 'unrelated.example' } }, response => {
@@ -222,10 +261,20 @@ test('foreign and malformed commands cannot launch a process or select a filesys
   assert.equal(rejectedHost, 403);
   assert.equal((await post('run', { tasks: 4, work_ms: 0, data_dir: dataRoot })).status, 400);
   assert.equal((await post('run', { tasks: 101, work_ms: 0 })).status, 400);
+  for (const body of [null, [], false, { directory: dataRoot }]) {
+    assert.equal((await post('reset', body)).status, 400);
+  }
+  const nonJson = await fetch(`${server.url}/api/reset`, { method: 'POST',
+    headers: { Origin: server.url, 'X-Asmrt-Token': snapshot.csrf_token, 'Content-Type': 'text/plain' }, body: '{}' });
+  assert.equal(nonJson.status, 415);
+  assert.equal((await fetch(`${server.url}/api/reset`)).status, 404);
   assert.equal((await post('resume')).status, 409);
-  assert.equal((await state()).phase, 'idle');
-  assert.equal((await state()).run, null);
-  assert.equal((await state()).pid, null);
+  assert.deepEqual(await state(), snapshot);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await post('reset');
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), snapshot);
+  }
 });
 
 test('interrupting the owned process preserves completed work and resumes interrupted attempts', { skip: !asmdbDir }, async t => {

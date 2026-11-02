@@ -292,6 +292,8 @@ Shutdown sends EOF by closing bridge stdin. The existing bridge's shutdown hook 
 
 Implementation entry point: [chat.rs](../src/chat.rs). The controller invokes this known Rust handler; it does not generate executable agent programs.
 
+This is **Workflow 1: sequential conversation**, with the explicit descriptor `conversation.sequential`, version `1`. Its [workflow contract](WORKFLOWS.md) defines ordering, cumulative inputs, completion and retries. “Workflow 1” names this first type; it is not a new handler/schema version or a generic workflow engine.
+
 ### Roles, turns, and the default exercise
 
 Planner, Builder, Critic, and Editor are **four logical roles sharing one installed model**. They take turns in that order. The default is two rounds, eight sequential turns, not four model processes or parallel speakers. Custom conversations may request one to three rounds.
@@ -431,11 +433,14 @@ Controller: [server.mjs](../visualizer/server.mjs). The browser is a view of the
 
 ### One console, distinct evidence
 
-The console places the **asmRT conversation/execution view and asmDB record view side by side**, with an event dock available without switching between them. This is one presentation of the same run, not independent execution modes connected to different databases.
+The console offers two presentations of the **same run**, not independent execution modes or different databases. The brand uses orange for **RT**, cyan for **DB**, and the four original role colors for the robots.
 
-**Overview** is the default: larger agent portraits, full replies and a compact native-record listing. **Deep dive** adds the recovery rail, attempts, input references, timings, hashes, exact raw-field option and read/checkpoint events. Both retain the same panes, observed state and inspectable saved work. The native radio selection is keyboard-operable and stored only in browser local storage; switching views does not issue a runtime command or model call. A previously checked raw-field option cannot spill technical JSON into Overview. Errors and retained-state notices remain visible in both modes.
+- **Overview**, the default, is a graphical team scene beside visual memory: large robot portraits, one full saved reply in a scrollable speech bubble, selectable memory tiles, and a short Talk / Crash / Recover / Verify rail. Native completed records produce committed checks; a published reply alone does not. Previous/next and tile selection browse saved text without starting inference. Follow latest resumes following incoming replies. The only ongoing animation marks an actual observed generation; it respects reduced motion.
+- **Details** is the professional side-by-side transcript and native-record console. It exposes attempts, input references, timings, hashes, exact raw fields, inspectors and the desktop event dock. Controls & files holds manual commands and the storage-only demonstration. Native listing order is preserved; Overview arranges its memory tiles in conversation-turn order.
 
-The first agent workflow is [**`conversation.sequential`, version 1**](WORKFLOWS.md), not a generic workflow engine. The saved-plan inspector identifies its effective type separately from the task-handler version.
+The native radio selection is keyboard-operable and stored only in browser local storage. View switches and reply browsing issue no runtime command or model call. A previously checked raw-field option cannot spill technical JSON into Overview. Errors and retained-state notices remain visible in both modes. Responsive layouts stack the panes rather than shrinking the content into unreadable columns.
+
+**Workflow 1** is [**`conversation.sequential`, version 1**](WORKFLOWS.md), not a generic workflow engine. The saved-plan inspector identifies its effective type separately from the task-handler version.
 
 Three different observations must remain distinguishable:
 
@@ -457,8 +462,21 @@ The Node server binds to `127.0.0.1:8787` by default and owns the Rust child and
 - Resume continues from the controller's saved gate/timing state; a controller restart instead requires an explicit resume/reopen.
 - A replacement writer must wait for the previous owned child to close. Errors stop automatic progression rather than guessing at uncertain outcomes.
 - Starting another run creates a new directory and preserves older runs. Controller startup restores the latest saved manifest as interrupted, without inventing task/file/database evidence.
+- **Reset demo** requires confirmation in the browser. The controller cancels playback/timers, stops and drains its owned runtime, removes only the `latest.json` selection pointer, and returns a normal empty idle snapshot. All old run folders, native files, plans, jobs and replies are preserved. Reset does not start inference or a replacement run; the next Start creates a new UUID directory. Reset is not recovery and does not rewrite old task records. Commands remain serialized; a command conflict returns 409 rather than racing two runs.
 
 Display pacing and simulated work delays are teaching controls. They do not measure database latency or represent native engine progress.
+
+### Console captures
+
+These captures show actual saved Ollama replies and native records, not the model fixture used in integration tests. The README shows the graphical Overview; Details exposes the evidence behind it.
+
+![Details: conversation and native asmDB records with a visible event dock](assets/screenshots/deep-dive.png)
+
+The stopped view below comes from a manual interruption of a retained run during a controller upgrade. Its counts reflect that interruption point, not the default turn-5 teaching crash described above.
+
+![Stopped Rust runtime with retained replies and last-observed native state](assets/screenshots/recovery.png)
+
+![Inspector showing saved instructions, input references and the actual reply](assets/screenshots/saved-job.png)
 
 ### HTTP surface
 
@@ -472,7 +490,8 @@ Command routes require the exact local `Origin`, JSON input, and `X-Asmrt-Token`
 | `POST /api/play` | Start/resume automatic playback of the current story |
 | `POST /api/pause` | Pause future automatic transitions |
 | `POST /api/interrupt` | Interrupt the owned runtime |
-| `POST /api/resume` | Reopen/resume the saved run |
+| `POST /api/resume` | Reopen/resume the saved run without automatically starting playback |
+| `POST /api/reset` | Stop and clear the selected demo, preserve saved runs; 202 with fresh idle state |
 | `POST /api/start`, `POST /api/next` | Retained manual/legacy controls; `next` uses the current checkpoint identity |
 | `GET /api/definitions/:id` | Read a validated saved task definition |
 | `GET /api/artifacts/:id` | Read an actual saved result/reply |
@@ -492,6 +511,8 @@ The guided deterministic demo claims up to the configured worker count, waits, p
 ```text
 repo-asmrt\
 ├── Cargo.toml / Cargo.lock
+├── LICENSE                    MIT license for asmRT
+├── CONTRIBUTING.md            Setup, tests and contribution guidance
 ├── src\
 │   ├── lib.rs                 Public types and error policy
 │   ├── model.rs               Native task codec and validation
@@ -510,6 +531,7 @@ repo-asmrt\
 ├── visualizer\                Node controller, browser assets, and HTTP tests
 ├── Docs\
 │   ├── ARCHITECTURE.md         This implementation reference
+│   ├── WORKFLOWS.md            Workflow 1 contract and version registry
 │   ├── diagrams\              Editable Mermaid sources
 │   ├── architecture\          Preserved older HTML/SVG/JSON concept material
 │   └── assets\                Preserved banner/posters and demonstration images
@@ -652,8 +674,9 @@ node --test .\visualizer\test\server.test.mjs .\visualizer\test\conversation.tes
 | [Runtime tests](../tests/runtime.rs) | Real persistence, contending claims, immutable definitions, idempotent completion, stale attempts, 1,001-task pagination, writer exclusion, data-directory protection |
 | [CLI tests](../tests/cli.rs) | Real file publication/replay, acknowledged event ordering, guided waits/partial batches, conflicting results left untouched |
 | [Fault harness](../scripts/test-recovery.ps1) | Separate loss of Rust, Node bridge, and engine; lock/child cleanup; reuse after publication-before-completion |
-| [Storage controller tests](../visualizer/test/server.test.mjs) | HTTP validation, actual observations, automatic/manual gates, pause/restart, timer cancellation, preserved runs |
-| [Conversation controller tests](../visualizer/test/conversation.test.mjs) | Causal saved inputs, interruption/resume, orphan replies, offline completed replay, changed files/model identity, command validation |
+| [Storage controller tests](../visualizer/test/server.test.mjs) | HTTP validation, actual observations, automatic/manual gates, pause/restart, reset while paused/playing, timer cancellation, preserved runs |
+| [Conversation controller tests](../visualizer/test/conversation.test.mjs) | Causal saved inputs, interruption/resume, orphan replies, offline completed replay, changed files/model identity, command validation, reset without inference and fresh next run |
+| [Console helpers](../visualizer/test/console.test.mjs) | Exact raw/readable native values, graphical saved-versus-committed memory, malformed records and observation-driven recovery chapters |
 
 The conversation integration tests use an explicitly **test-only local HTTP model fixture** for deterministic failure cases. It is not the application model and its responses are not fallback dialogue. Rust tests in [chat.rs](../src/chat.rs) also check preserved v1/v2/v3 request hashes and replay of earlier saved plans/prefixes without rewriting their files. A genuine Ollama run and browser evidence are separate from a successful fixture test.
 

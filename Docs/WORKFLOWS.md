@@ -1,12 +1,12 @@
 # Agent workflow types
 
-A workflow type names an orchestration contract, not a task handler or a model. This reference defines the first implemented agent workflow. See the [architecture reference](ARCHITECTURE.md) for process boundaries, native records, and recovery details, and the [glossary](../CONTEXT.md) for terminology.
+A workflow type names an orchestration contract, not a task handler or a model. This reference defines **Workflow 1: sequential conversation**, the first implemented agent workflow. See the [architecture reference](ARCHITECTURE.md) for process boundaries, native records, and recovery details, and the [glossary](../CONTEXT.md) for terminology.
 
 ## Type registry
 
-| Kind | Workflow version | Status | Contract |
-| --- | --- | --- | --- |
-| `conversation.sequential` | `1` | Implemented | Fixed-order agent turns over a shared committed conversation prefix, repeated for a fixed number of rounds. |
+| Workflow | Kind | Workflow version | Status | Contract |
+| --- | --- | --- | --- | --- |
+| 1 | `conversation.sequential` | `1` | Implemented | Fixed-order agent turns over a shared committed conversation prefix, repeated for a fixed number of rounds. |
 
 The existing **storage demo** (`demo` CLI command) is a deterministic concurrent runtime exercise, not another registered agent workflow type.
 
@@ -21,7 +21,9 @@ New `conversation.json` plans include this field (manifest excerpt):
 }
 ```
 
-## `conversation.sequential` v1
+## Workflow 1: sequential conversation
+
+Canonical descriptor: `conversation.sequential`, version `1`. “Workflow 1” is its documentation label, not an additional serialized field.
 
 ### Sequence and context
 
@@ -57,6 +59,12 @@ Recovery validates the ordered committed prefix, saved definitions, job/request 
 Before reply publication, a retry may repeat a model call even if inference already ran. The workflow does **not** promise exactly-once inference. Publication and native completion are separate durable steps.
 
 **Open-order boundary:** the existing `Runtime::open` performs native recovery before the chat application's plan validation. Rejecting an unsupported plan therefore prevents subsequent chat preparation/execution, but does not make opening a run read-only or undo an earlier native `running → pending` recovery transition.
+
+### Browser controls are not workflow types
+
+The playful **Overview** and professional **Details** present the same run. Browsing a saved reply or switching views does not schedule an agent or alter the workflow. Overview's committed-memory checks come from native record observations, not merely from reply files.
+
+**Pause** holds future story transitions; active inference may still finish. **Reset demo** stops playback and the owned runtime, clears the selected run and observations, and preserves old run directories. It starts no inference. The next **Start conversation** creates a new directory and plan; reset does not rewind or rewrite Workflow 1's old history. See the [controller contract](ARCHITECTURE.md#7-browser-controller-and-observable-evidence).
 
 ## Versions and compatibility
 

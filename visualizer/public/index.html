@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-detail="overview">
+<html lang="en" data-detail="overview" data-presentation="overview">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -23,11 +23,11 @@
         <fieldset id="detail-switch" class="detail-switch">
           <legend class="sr-only">Console detail level</legend>
           <label><input class="sr-only" type="radio" name="console-detail" value="overview" checked><span>Overview</span></label>
-          <label><input class="sr-only" type="radio" name="console-detail" value="deep"><span>Deep dive</span></label>
+          <label><input class="sr-only" type="radio" name="console-detail" value="deep"><span>Details</span></label>
         </fieldset>
         <div class="header-controls">
           <span id="connection-status" class="connection-status" data-connected="false" role="status" aria-live="polite">Connecting</span>
-          <button id="open-controls" class="button button-small" type="button" aria-haspopup="dialog" aria-controls="controls-dialog">Controls &amp; files</button>
+          <button id="open-controls" class="button button-small deep-only" type="button" aria-haspopup="dialog" aria-controls="controls-dialog">Controls &amp; files</button>
           <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false"><span aria-hidden="true">◐</span><span>Dark mode</span></button>
         </div>
       </header>
@@ -35,17 +35,51 @@
       <main id="main" tabindex="-1">
         <section class="mission" aria-label="Conversation mission">
           <form id="conversation-form" class="conversation-form" novalidate>
-            <div class="field">
+            <div class="overview-mission overview-only"><h2 id="overview-title">Can they save pizza night?</h2><p id="overview-topic">Eight friends. $40. One oven.</p></div>
+            <div class="field deep-only">
               <label for="conversation-topic">The mission <span>Give the team a problem</span></label>
               <textarea id="conversation-topic" name="topic" rows="2" required aria-describedby="conversation-topic-help conversation-topic-error">Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.</textarea>
               <p id="conversation-topic-help" class="section-help">Eight short replies. A broken oven. A real process crash.</p>
               <p id="conversation-topic-error" class="field-error" role="alert" hidden></p>
             </div>
             <div class="conversation-transport">
-              <button id="start-conversation" class="button button-primary" type="submit" aria-describedby="conversation-control-note" disabled><span id="conversation-icon" aria-hidden="true">▶</span><span id="conversation-button-label">Start conversation</span></button>
+              <div class="conversation-actions">
+                <button id="start-conversation" class="button button-primary" type="submit" aria-describedby="conversation-control-note" disabled><span id="conversation-icon" aria-hidden="true">▶</span><span id="conversation-button-label">Start conversation</span></button>
+                <button id="reset-demo" class="button reset-button" type="button" aria-haspopup="dialog" aria-controls="reset-dialog" aria-describedby="reset-hint" disabled><span aria-hidden="true">↺</span> Reset demo</button>
+              </div>
               <p id="conversation-control-note" class="section-help">Connecting to the local controller.</p>
+              <span id="reset-hint" class="sr-only">Stops playback and clears this view. Previous run folders are kept. Start conversation begins a new run.</span>
             </div>
           </form>
+        </section>
+        <section id="overview-stage" class="overview-stage" aria-label="A conversation that survives a restart">
+          <section class="team-scene" aria-labelledby="team-title">
+            <header class="scene-heading"><h2 id="team-title"><span class="scene-wordmark">asm<b>RT</b></span><span class="scene-caption">The team</span></h2><p id="overview-status" class="overview-status" role="status" aria-live="polite">Ready when you are.</p></header>
+            <ol id="overview-agents" class="overview-agents" aria-label="Workflow 1: Planner, Builder, Critic, then Editor. One agent at a time.">
+              <li class="overview-agent" data-agent-id="planner" data-worker-slot="0"><div class="worker-portrait" role="img" aria-label="Cyan Planner robot"></div><h3>Planner</h3><p class="overview-agent-status"></p></li>
+              <li class="overview-agent" data-agent-id="builder" data-worker-slot="1"><div class="worker-portrait" role="img" aria-label="Mint Builder robot"></div><h3>Builder</h3><p class="overview-agent-status"></p></li>
+              <li class="overview-agent" data-agent-id="critic" data-worker-slot="2"><div class="worker-portrait" role="img" aria-label="Orange Critic robot"></div><h3>Critic</h3><p class="overview-agent-status"></p></li>
+              <li class="overview-agent" data-agent-id="editor" data-worker-slot="3"><div class="worker-portrait" role="img" aria-label="Lavender Editor robot"></div><h3>Editor</h3><p class="overview-agent-status"></p></li>
+            </ol>
+            <section id="overview-reply" class="overview-reply" aria-labelledby="overview-speaker">
+              <div class="overview-reply-heading"><h3 id="overview-speaker">Dinner needs a plan.</h3><span id="overview-reply-state"></span></div>
+              <div id="overview-reply-scroll" class="overview-reply-scroll" tabindex="0" role="region" aria-label="Full saved reply"><p id="overview-message" aria-live="polite" aria-atomic="true">Press Start conversation. The robots take it from here.</p></div>
+              <div id="overview-reply-navigation" class="overview-reply-navigation" hidden>
+                <button id="overview-previous" class="button reply-arrow" type="button" aria-label="Previous saved reply">←</button>
+                <span id="overview-reply-position" role="status" aria-live="polite"></span>
+                <button id="overview-next" class="button reply-arrow" type="button" aria-label="Next saved reply">→</button>
+                <button id="overview-latest" class="button button-small" type="button" hidden>Follow latest</button>
+              </div>
+            </section>
+          </section>
+          <section id="overview-memory" class="memory-scene" aria-labelledby="memory-title">
+            <header class="scene-heading"><h2 id="memory-title"><span class="scene-wordmark">asm<b>DB</b></span><span class="scene-caption">The memory</span></h2><svg class="memory-symbol" viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="24" cy="11" rx="16" ry="6"/><path d="M8 11v25c0 8 32 8 32 0V11M8 23c0 8 32 8 32 0"/><path d="m20 33 3 3 6-7"/></svg></header>
+            <div class="memory-tally"><strong><span id="overview-memory-count">0</span><span class="memory-total"> / <span id="overview-memory-total">8</span></span></strong><p>turns committed</p></div>
+            <ol id="overview-memory-cells" class="memory-cells" aria-label="Turn records from asmDB. Published replies can be selected."></ol>
+            <p id="overview-memory-note" class="memory-note">Nothing saved yet.</p>
+            <div id="overview-proof" class="overview-proof" hidden><span aria-hidden="true">✓</span><p><strong>Restarted. Still here.</strong><span>No new model calls on replay.</span></p></div>
+          </section>
+          <ol id="overview-journey" class="overview-journey" aria-label="Automatic recovery sequence"><li data-chat-chapter="0"><span aria-hidden="true">1</span>Talk</li><li data-chat-chapter="1"><span aria-hidden="true">2</span>Crash</li><li data-chat-chapter="2"><span aria-hidden="true">3</span>Recover</li><li data-chat-chapter="3"><span aria-hidden="true">4</span>Verify</li></ol>
         </section>
         <div id="live-stage" class="live-stage" data-focus="">
           <section class="runtime-panel" aria-labelledby="runtime-title">
@@ -137,7 +171,7 @@
             <div id="database-scroll" class="database-scroll" tabindex="0" role="region" aria-labelledby="database-title" aria-describedby="database-scroll-hint">
               <p id="database-scroll-hint" class="sr-only">Scrollable records table. On narrow screens, use the arrow keys to scroll horizontally.</p>
               <table class="records-table">
-                <caption class="sr-only">Actual db_list rows in native order. Select saved work to inspect it. Deep dive adds attempts, references and hashes; Raw fields shows exact bridge-decoded values.</caption>
+                <caption class="sr-only">Actual db_list rows in native order. Select saved work to inspect it. Details includes attempts, references and hashes; Raw fields shows exact bridge-decoded values.</caption>
                 <thead><tr><th scope="col">Task <span>ID</span></th><th scope="col">Attempt <span>VALUE</span></th><th scope="col">State <span>TAG</span></th><th scope="col">Saved work <span>CONTENT · select to inspect</span></th></tr></thead>
                 <tbody id="database-rows"></tbody>
               </table>
@@ -162,6 +196,12 @@
       </main>
       <footer class="page-footer"><span><code id="conversation-model">qwen3.5:0.8b</code> · one local model, four roles</span><span>No cloud key. Previous runs are kept.</span></footer>
     </div>
+
+    <dialog id="reset-dialog" class="artifact-dialog reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
+      <h2 id="reset-title">Start fresh?</h2>
+      <p id="reset-description">Playback and this runtime will stop. Your saved conversations stay on disk. Nothing starts until you press Start conversation again.</p>
+      <div class="reset-actions"><button id="cancel-reset" class="button" type="button" autofocus>Cancel</button><button id="confirm-reset" class="button button-primary" type="button">Reset demo</button></div>
+    </dialog>
 
     <dialog id="controls-dialog" class="artifact-dialog controls-dialog" aria-labelledby="controls-dialog-title">
       <div class="dialog-heading"><div><h2 id="controls-dialog-title">Controls &amp; saved files</h2><p>Real jobs and replies. Each run keeps its own folder.</p></div><button id="close-controls" class="button button-small" type="button" autofocus>Close</button></div>

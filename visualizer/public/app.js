@@ -1,8 +1,16 @@
-import { nativeRecordFields, conversationChapter } from "/console-view.mjs";
+import { nativeRecordFields, conversationChapter, conversationMemory } from "/console-view.mjs";
 
 const byId = (id) => document.getElementById(id);
 const ui = {
   conversation: byId("conversation-view"), storageStory: byId("storage-story"),
+  overview: byId("overview-stage"), overviewTitle: byId("overview-title"), overviewTopic: byId("overview-topic"),
+  overviewStatus: byId("overview-status"), overviewReply: byId("overview-reply"), overviewSpeaker: byId("overview-speaker"),
+  overviewMessage: byId("overview-message"), overviewReplyState: byId("overview-reply-state"), overviewReplyScroll: byId("overview-reply-scroll"),
+  overviewNavigation: byId("overview-reply-navigation"), overviewPosition: byId("overview-reply-position"),
+  overviewPrevious: byId("overview-previous"), overviewNext: byId("overview-next"), overviewLatest: byId("overview-latest"),
+  memory: byId("overview-memory"), memoryCells: byId("overview-memory-cells"), memoryCount: byId("overview-memory-count"),
+  memoryTotal: byId("overview-memory-total"), memoryNote: byId("overview-memory-note"), overviewProof: byId("overview-proof"),
+  reset: byId("reset-demo"), resetDialog: byId("reset-dialog"), resetCancel: byId("cancel-reset"), resetConfirm: byId("confirm-reset"),
   controls: byId("controls-dialog"), openControls: byId("open-controls"), closeControls: byId("close-controls"),
   storageStart: byId("start-storage-story"), rawRecords: byId("raw-records"), allEvents: byId("all-events"),
   conversationForm: byId("conversation-form"), topic: byId("conversation-topic"), topicHelp: byId("conversation-topic-help"),
@@ -84,6 +92,11 @@ const artifactCache = new Map();
 const definitionCache = new Map();
 const messageNodes = new Map();
 const jobNodes = new Map();
+const memoryNodes = new Map();
+const overviewAgents = [...document.querySelectorAll("#overview-agents > li")].map(root => ({
+  root, id: root.dataset.agentId, name: root.querySelector("h3"), status: root.querySelector(".overview-agent-status"),
+}));
+const overviewJourney = [...document.querySelectorAll("#overview-journey > li")];
 const agents = [...document.querySelectorAll("#agent-roster [data-agent-id]")].map((root) => ({
   root, id: root.dataset.agentId, name: root.querySelector(".agent-name"), role: root.querySelector(".agent-role"),
   status: root.querySelector(".agent-status"), portrait: root.querySelector(".agent-portrait"),
@@ -113,6 +126,7 @@ const detailChoices = [...document.querySelectorAll('input[name="console-detail"
 let detailMode = "overview";
 const DEFAULT_TOPIC = "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";
 let lastConversation = null;
+let selectedOverviewReply = null;
 
 function text(node, value) {
   const next = String(value ?? "");
@@ -218,6 +232,11 @@ function hasLiveConversationProcess() {
 
 function renderLayout() {
   const storage = Boolean(state?.run && !isConversation() && !unobservedLegacyRun());
+  const overview = detailMode === "overview" && !storage;
+  document.documentElement.dataset.presentation = overview ? "overview" : "details";
+  ui.overview.hidden = !overview;
+  ui.stage.hidden = overview;
+  byId("journal").hidden = overview;
   ui.conversation.hidden = storage;
   ui.storageStory.hidden = !storage;
   ui.workersStage.hidden = !storage;
@@ -340,13 +359,16 @@ function acceptState(next) {
   const freshEvents = hadState && !runChanged ? next.events.filter((event) => !previousEventKeys.has(eventKey(event))) : [];
   if (runChanged) {
     if (ui.dialog.open) ui.dialog.close();
-    const focusRemoved = [ui.files, ui.decodedRows, ui.messages, ui.jobs].some((node) => node.contains(document.activeElement));
+    const focusRemoved = [ui.files, ui.decodedRows, ui.messages, ui.jobs, ui.memoryCells].some((node) => node.contains(document.activeElement));
     cancelArtifact();
     cancelDefinition();
     selectedTaskId = null;
     artifactView = null;
     definitionView = null;
     lastConversation = null;
+    selectedOverviewReply = null;
+    memoryNodes.clear();
+    ui.memoryCells.replaceChildren();
     artifactCache.clear();
     definitionCache.clear();
     messageNodes.clear();
@@ -395,6 +417,7 @@ function markDisconnected(error) {
 
 function actionAllowed(kind) {
   if (!connected || !state?.csrf_token) return false;
+  if (kind === "reset") return true;
   if (["conversation", "storage"].includes(kind)) return !workInFlight();
   if (kind === "pause") return Boolean((isConversation() || state.run?.story)
     && state.playback?.status === "playing" && !verifiedReplay());
@@ -479,6 +502,9 @@ async function performAction(kind, options = {}) {
 
 function renderControls() {
   const busy = activeAction !== null;
+  ui.reset.disabled = busy || !actionAllowed("reset");
+  ui.resetConfirm.disabled = ui.reset.disabled;
+  text(ui.resetConfirm, activeAction === "reset" ? "Resetting..." : "Reset demo");
   ui.play.disabled = busy || !actionAllowed(primaryAction());
   ui.storageStart.disabled = busy || !actionAllowed("storage");
   ui.start.disabled = busy || !actionAllowed("run");
@@ -495,7 +521,7 @@ function renderControls() {
   text(ui.resume, activeAction === "resume" ? "Reopening..." : state?.phase === "finished" ? "Check replay" : "Reopen run");
   text(ui.next, activeAction === "next" ? "Continuing..." : "Next checkpoint");
   const messages = { conversation: "Starting a fresh conversation. Rust will execute the saved jobs using the local model.", storage: "Starting a fresh storage story in a separate run folder.", play: "Resuming server-timed playback.", pause: "Requesting a pause. The current operation may finish at its safe checkpoint.", run: "Starting an independent Rust run.", interrupt: "Stopping this run's real runtime. Its files and database are kept.", resume: "Reopening the existing run and reading its durable state.", next: "Advancing only the checkpoint selected by your click." };
-  text(ui.actionStatus, messages[activeAction] ?? "");
+  text(ui.actionStatus, activeAction === "reset" ? "Stopping playback and clearing this view. Saved runs are kept; no new model call starts." : messages[activeAction] ?? "");
   text(ui.controlNote, !connected ? "Commands are disabled until the local controller is reachable."
     : busy ? "Waiting for the current command. No duplicate command is sent."
       : storyOngoing() ? "Playback is still in flight. Pause holds at a safe checkpoint; Stop runtime is available only while Rust is running. Saved work is kept."
@@ -533,6 +559,8 @@ function renderConversationControls() {
   else if (isConversation() && activePhases.has(state.phase)) note = "Runtime active. Waiting for its next checkpoint.";
   else if (isConversation() && state.phase === "finished") note = "Try another mission. This run is kept.";
   text(ui.conversationControl, note);
+  attribute(ui.conversationControl, "data-essential", !connected || busy || (!isConversation() && workInFlight())
+    || kind === "resume" || Boolean(state?.playback?.transitioning));
 }
 
 function inspectorButton(label, id, definition = false) {
@@ -723,6 +751,124 @@ function renderConversation() {
   text(ui.conversationReused, current && verifiedReplay() ? `${messages.length} replies checked from disk` : "");
   renderMessages(snapshot);
   renderConversationJobs(snapshot);
+}
+
+function renderOverview() {
+  const current = isConversation();
+  const snapshot = conversationSnapshot();
+  const messages = snapshot?.messages ?? [];
+  const total = snapshot?.turns_total ?? (current ? state.run.tasks : 8);
+  const active = snapshot?.active;
+  const generating = hasLiveConversationProcess() && state.conversation?.active?.stage === "generating";
+  const latestLaunch = currentProcessEvents().find(event => event.event === "launching");
+  const awaitingNativeRead = Boolean(state?.database && latestLaunch && Date.parse(state.database.at) < Date.parse(latestLaunch.at));
+  const retained = current && (!connected || !state.conversation || awaitingNativeRead || ["starting", "stopping", "interrupted", "error"].includes(state.phase));
+  const topic = snapshot?.topic ?? (current ? state.run.topic : ui.topic.value.trim());
+  const pizza = topic === DEFAULT_TOPIC;
+  const cells = conversationMemory(snapshot, current ? state.database?.response : null, total);
+  const shownId = ui.overviewReply.dataset.replyId;
+  if (selectedOverviewReply === null && shownId && ui.overviewReplyScroll.contains(document.activeElement)) selectedOverviewReply = shownId;
+  let index = messages.findIndex(message => message.task_id === selectedOverviewReply);
+  if (index < 0) { selectedOverviewReply = null; index = messages.length - 1; }
+  const message = messages[index];
+  const activeAgent = snapshot?.agents.find(agent => agent.id === active?.agent_id);
+  const scene = current ? state.playback?.scene.id : null;
+  const chapter = conversationChapter(scene, current ? state.tasks : []);
+  const verified = current && verifiedReplay();
+
+  text(ui.overviewTitle, pizza ? "Can they save pizza night?" : "The team has a mission.");
+  text(ui.overviewTopic, pizza ? "Eight friends. $40. One oven." : topic || "Give the team a problem in Details.");
+  let status = "Ready when you are.";
+  if (!connected) status = state ? "Offline. Last observed replies." : "Connecting...";
+  else if (current) {
+    if (state.phase === "error") status = "Runtime error. Saved work is kept.";
+    else if (state.phase === "stopping") status = "Stopping the runtime...";
+    else if (state.phase === "interrupted") status = "Runtime stopped. Memory stays.";
+    else if (state.phase === "starting" || !state.conversation) status = "Reading saved work...";
+    else if (verified) status = "Replay verified.";
+    else if (generating) status = `${activeAgent?.name ?? active.agent_id} is thinking...`;
+    else if (state.playback?.status === "paused") status = "Paused. Take your time.";
+    else if (state.phase === "finished") status = state.playback?.status === "playing" ? "Checking what survived..." : "Conversation finished.";
+    else if (scene === "chat-crash-next") status = "Next up: a real process crash.";
+    else if (active?.stage === "saved") status = `${activeAgent?.name ?? active.agent_id}'s reply is saved.`;
+    else if (active?.stage === "assigned") status = `${activeAgent?.name ?? active.agent_id} is up next.`;
+    else status = "Passing the conversation along.";
+  }
+  text(ui.overviewStatus, status);
+  attribute(ui.overview, "data-retained", retained);
+  for (const agent of overviewAgents) {
+    const definition = snapshot?.agents.find(item => item.id === agent.id) ?? DEFAULT_AGENTS.find(item => item.id === agent.id);
+    const thinking = generating && active?.agent_id === agent.id;
+    const selected = message?.agent_id === agent.id;
+    text(agent.name, definition.name);
+    text(agent.status, thinking ? "Thinking..." : selected ? index === messages.length - 1 ? "Latest reply" : `Reply ${message.task_id}` : "");
+    attribute(agent.root, "data-thinking", thinking);
+    attribute(agent.root, "data-selected", selected);
+  }
+  const speakerSlot = Math.max(0, overviewAgents.findIndex(agent => agent.id === message?.agent_id));
+  ui.overviewReply.style.setProperty("--speaker-slot", speakerSlot);
+  ui.overviewReply.style.setProperty("--speaker-mobile-slot", speakerSlot % 2);
+  attribute(ui.overviewReply, "data-speaker", message?.agent_id ?? "");
+  attribute(ui.overviewReply, "data-reply-id", message?.task_id ?? "");
+  text(ui.overviewSpeaker, message ? `${message.agent_name} says` : current ? "No reply yet." : pizza ? "Dinner needs a plan." : "Ready for a new mission.");
+  text(ui.overviewMessage, message?.text ?? (current ? "Waiting for a complete reply. Nothing is prewritten." : "Press Start conversation. The robots take it from here."));
+  const memoryState = cells.find(cell => cell.id === message?.task_id)?.status;
+  text(ui.overviewReplyState, !message ? "" : memoryState === "committed" ? "Committed"
+    : memoryState === "unknown" ? "Record needs inspection" : message.committed ? "Awaiting DB read" : "Saved, awaiting commit");
+  attribute(ui.overviewReplyState, "data-state", memoryState ?? "");
+  ui.overviewNavigation.hidden = messages.length === 0;
+  ui.overviewPrevious.disabled = index <= 0;
+  ui.overviewNext.disabled = index >= messages.length - 1;
+  ui.overviewLatest.hidden = selectedOverviewReply === null;
+  text(ui.overviewPosition, messages.length ? `${index + 1} / ${messages.length}` : "");
+  attribute(ui.overviewPosition, "aria-label", messages.length ? `Saved reply ${index + 1} of ${messages.length}` : "No saved replies");
+  if (shownId !== message?.task_id && !ui.overviewReplyScroll.contains(document.activeElement)) ui.overviewReplyScroll.scrollTop = 0;
+
+  const labels = { committed: "Committed in asmDB", saved: "Reply saved; native completion not observed", assigned: "Assigned", waiting: "Pending", unobserved: "Not observed", unknown: "Unrecognized native record" };
+  const marks = { committed: "✓", saved: "○", assigned: "…", waiting: "·", unobserved: "·", unknown: "?" };
+  const nodes = cells.map(cell => {
+    let entry = memoryNodes.get(cell.id);
+    if (!entry) {
+      const root = element("li");
+      const button = element("button", "memory-cell");
+      button.type = "button";
+      button.dataset.overviewReply = cell.id;
+      const turn = element("span", "memory-turn", cell.id);
+      const mark = element("span", "memory-mark");
+      mark.setAttribute("aria-hidden", "true");
+      button.append(turn, mark);
+      root.append(button);
+      entry = { root, button, mark };
+      memoryNodes.set(cell.id, entry);
+    }
+    entry.button.disabled = !cell.message;
+    text(entry.mark, marks[cell.status]);
+    attribute(entry.button, "data-state", cell.status);
+    attribute(entry.button, "aria-pressed", Boolean(message && cell.id === message.task_id));
+    attribute(entry.button, "aria-label", `Turn ${cell.id}. ${labels[cell.status]}.${cell.message ? ` Read ${cell.message.agent_name}'s reply.` : ""}`);
+    return entry.root;
+  });
+  reconcileChildren(ui.memoryCells, nodes);
+  const committed = cells.filter(cell => cell.status === "committed").length;
+  const saved = cells.filter(cell => cell.status === "saved");
+  const uncommitted = saved.filter(cell => !cell.message.committed).length;
+  const awaitingRead = saved.length > uncommitted;
+  text(ui.memoryCount, current && !state.database ? "?" : committed);
+  text(ui.memoryTotal, total);
+  attribute(ui.memory, "data-retained", retained);
+  text(ui.memoryNote, retained ? "Last observed memory, not a live read."
+    : cells.some(cell => cell.status === "unknown") ? "Some native records need inspection in Details."
+      : uncommitted ? `${uncommitted} ${uncommitted === 1 ? "reply saved" : "replies saved"}, awaiting commit.${awaitingRead ? " Other completions await a DB read." : ""}`
+        : awaitingRead ? "New completions appear on the next database read."
+          : messages.length ? "Real reply files. Real asmDB records." : current ? "Waiting for the first saved reply." : "Nothing saved yet.");
+  ui.overviewProof.hidden = !verified;
+  for (const item of overviewJourney) {
+    const step = Number(item.dataset.chatChapter);
+    if (step === chapter && !verified) attribute(item, "aria-current", "step");
+    else item.removeAttribute("aria-current");
+    attribute(item, "data-past", step < chapter || verified);
+    text(item.querySelector("span"), step < chapter || verified ? "✓" : step + 1);
+  }
 }
 
 function renderStory() {
@@ -1267,6 +1413,7 @@ function render({ highlight = false, freshEvents = [] } = {}) {
   renderStory();
   renderNotices();
   renderConversation();
+  renderOverview();
   renderWorkers(highlight);
   renderDatabase(highlight);
   renderFiles(highlight);
@@ -1284,6 +1431,30 @@ function bindCommand(button, callback) {
 ui.openControls.addEventListener("click", () => { ui.controls.showModal(); ui.closeControls.focus({ preventScroll: true }); });
 ui.closeControls.addEventListener("click", () => ui.controls.close());
 ui.controls.addEventListener("close", () => ui.openControls.focus({ preventScroll: true }));
+bindCommand(ui.reset, () => { if (actionAllowed("reset")) { ui.resetDialog.showModal(); ui.resetCancel.focus({ preventScroll: true }); } });
+ui.resetCancel.addEventListener("click", () => ui.resetDialog.close());
+ui.resetDialog.addEventListener("close", () => { if (!ui.reset.disabled) ui.reset.focus({ preventScroll: true }); else focusPrimary(); });
+bindCommand(ui.resetConfirm, () => { if (actionAllowed("reset")) { ui.resetDialog.close(); void performAction("reset"); } });
+function moveOverviewReply(offset) {
+  const messages = conversationSnapshot()?.messages ?? [];
+  const current = messages.findIndex(message => message.task_id === ui.overviewReply.dataset.replyId);
+  const target = messages[current + offset];
+  if (!target) return;
+  selectedOverviewReply = target.task_id;
+  renderOverview();
+}
+ui.overviewPrevious.addEventListener("click", () => moveOverviewReply(-1));
+ui.overviewNext.addEventListener("click", () => moveOverviewReply(1));
+ui.overviewLatest.addEventListener("click", () => { selectedOverviewReply = null; renderOverview(); });
+ui.overviewReplyScroll.addEventListener("wheel", () => {
+  if (ui.overviewReply.dataset.replyId) selectedOverviewReply = ui.overviewReply.dataset.replyId;
+}, { passive: true });
+ui.memoryCells.addEventListener("click", event => {
+  const button = event.target.closest("button[data-overview-reply]");
+  if (!button || !ui.memoryCells.contains(button) || button.disabled) return;
+  selectedOverviewReply = button.dataset.overviewReply;
+  renderOverview();
+});
 ui.rawRecords.addEventListener("change", () => renderDatabase(false));
 ui.allEvents.addEventListener("change", () => renderEvents([]));
 bindCommand(ui.storageStart, () => { if (actionAllowed("storage")) { ui.controls.close(); void performAction("storage"); } });
@@ -1302,11 +1473,11 @@ ui.conversationForm.addEventListener("submit", (event) => {
     attribute(ui.topic, "aria-invalid", !valid);
     ui.topicError.hidden = valid;
     text(ui.topicError, valid ? "" : "Enter a topic from 1 to 400 characters.");
-    if (!valid) { ui.topic.focus(); return; }
+    if (!valid) { selectDetail("deep"); ui.topic.focus(); return; }
   }
   void performAction(kind, kind === "conversation" ? { topic } : {});
 });
-ui.topic.addEventListener("input", () => { ui.topic.removeAttribute("aria-invalid"); ui.topicError.hidden = true; renderConversationControls(); renderConversation(); });
+ui.topic.addEventListener("input", () => { ui.topic.removeAttribute("aria-invalid"); ui.topicError.hidden = true; renderConversationControls(); renderConversation(); renderOverview(); });
 bindCommand(ui.play, () => { void performAction(primaryAction()); });
 bindCommand(ui.interrupt, () => { void performAction("interrupt"); });
 bindCommand(ui.resume, () => { void performAction("resume"); });
@@ -1387,12 +1558,14 @@ function renderDetail() {
   document.documentElement.dataset.detail = detailMode;
   for (const choice of detailChoices) choice.checked = choice.value === detailMode;
 }
-for (const choice of detailChoices) choice.addEventListener("change", () => {
-  if (!choice.checked) return;
-  detailMode = choice.value;
+function selectDetail(value) {
+  detailMode = value;
   try { localStorage.setItem("asmrt-visualizer-detail", detailMode); } catch { /* Persistence is optional. */ }
   renderDetail();
   render();
+}
+for (const choice of detailChoices) choice.addEventListener("change", () => {
+  if (choice.checked) selectDetail(choice.value);
 });
 renderDetail();
 renderTheme();

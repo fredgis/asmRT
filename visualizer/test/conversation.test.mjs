@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -248,6 +248,76 @@ test('a saved but uncommitted reply survives a controller restart without a seco
   await assertPreserved(original);
   const committed = await next(f, 'completed', '1');
   assert.equal(committed.conversation.messages[0].committed, true);
+});
+
+test('reset forgets a paused conversation without deleting saved work, and Start creates an empty new run', enabled, async t => {
+  const f = await fixture(t, { storySceneMs: 60000 });
+  const idle = await f.state();
+  await startPaused(f);
+  await next(f, 'claimed', '1');
+  await next(f, 'published', '1');
+  await next(f, 'completed', '1');
+  await next(f, 'claimed', '2');
+  const saved = await next(f, 'published', '2');
+  assert.deepEqual(saved.conversation.messages.map(message => message.committed), [true, false]);
+  const originals = await savedFiles(saved.run, ['1', '2']);
+  for (const relative of ['conversation.json', ...saved.tasks.map(task => path.join('definitions', `${task.id}.json`))]) {
+    const filename = path.join(saved.run.directory, relative);
+    originals.push({ filename, bytes: await readFile(filename), modified: (await stat(filename)).mtimeMs });
+  }
+  const entries = await readdir(saved.run.directory);
+  const calls = f.requests.length;
+  const tags = f.tags;
+  const response = await f.post('reset');
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), idle, 'reset returns the fresh idle snapshot, retaining source and CSRF capabilities');
+  assert.throws(() => process.kill(saved.pid, 0), { code: 'ESRCH' }, 'reset must wait for its Rust process to exit');
+  assert.deepEqual(await f.state(), idle);
+  assert.equal(f.requests.length, calls, 'reset must not generate another reply');
+  assert.equal(f.tags, tags, 'reset must not open a model or a conversation');
+  assert.deepEqual(await readdir(saved.run.directory), entries);
+  await assertPreserved(originals);
+  assert.equal((await f.get('/api/artifacts/1')).status, 404);
+  assert.equal((await f.get('/api/definitions/1')).status, 404);
+  assert.equal((await f.post('next', { checkpoint: saved.checkpoint.id })).status, 409);
+  assert.equal((await f.post('resume')).status, 409);
+  await f.restart();
+  const restarted = await f.state();
+  assert.deepEqual(restarted, { ...idle, csrf_token: restarted.csrf_token }, 'reset must also forget the selected run across controller restarts');
+  const fresh = await startPaused(f, { topic: 'Choose a completely new conversation topic.', rounds: 1 });
+  assert.notEqual(fresh.run.id, saved.run.id);
+  assert.notEqual(fresh.run.directory, saved.run.directory);
+  assert.deepEqual(fresh.conversation.messages, []);
+  assert(fresh.tasks.every(task => task.state === 'pending' && task.attempt === '0'));
+  assert(fresh.database.response.rows.every(row => row.tag === 'asmrt.v2.pending'));
+  assert.equal(f.requests.length, calls);
+  await next(f, 'claimed', '1');
+  const published = await next(f, 'published', '1');
+  assert.equal(published.conversation.messages.length, 1);
+  assert.equal(f.requests.at(-1).body.messages.length, 3, 'the first new model request has no old replies in its context');
+  assert.deepEqual(await readdir(saved.run.directory), entries);
+  await assertPreserved(originals);
+});
+
+test('reset stops an in-flight conversation and late model replies cannot restore the old state', enabled, async t => {
+  const f = await fixture(t, { storySceneMs: 220 });
+  const idle = await f.state();
+  f.hold();
+  assert.equal((await f.post('conversation', { rounds: 1 })).status, 202);
+  const generating = await until(f.state, state => state.conversation?.active?.stage === 'generating' && f.requests.length === 1,
+    'no real in-flight model request observed');
+  const tags = f.tags;
+  const response = await f.post('reset');
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), idle);
+  assert.throws(() => process.kill(generating.pid, 0), { code: 'ESRCH' });
+  f.release();
+  await delay(600);
+  assert.equal(f.replies.length, 1, 'the test model released its late response');
+  assert.equal(f.requests.length, 1, 'reset must not open another inference');
+  assert.equal(f.tags, tags);
+  assert.deepEqual(await f.state(), idle, 'late replies and old playback callbacks must not revive the discarded run');
+  await assert.rejects(readFile(path.join(generating.run.directory, 'artifacts', '1.json')), { code: 'ENOENT' });
 });
 
 test('pausing a genuine in-flight model request finishes only at its saved-reply checkpoint', enabled, async t => {
