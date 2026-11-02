@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-detail="overview">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -20,6 +20,11 @@
           <span class="wordmark">asm<span>RT</span></span>
           <h1 class="local-label">Agents stop. Work survives.</h1>
         </div>
+        <fieldset id="detail-switch" class="detail-switch">
+          <legend class="sr-only">Console detail level</legend>
+          <label><input class="sr-only" type="radio" name="console-detail" value="overview" checked><span>Overview</span></label>
+          <label><input class="sr-only" type="radio" name="console-detail" value="deep"><span>Deep dive</span></label>
+        </fieldset>
         <div class="header-controls">
           <span id="connection-status" class="connection-status" data-connected="false" role="status" aria-live="polite">Connecting</span>
           <button id="open-controls" class="button button-small" type="button" aria-haspopup="dialog" aria-controls="controls-dialog">Controls &amp; files</button>
@@ -58,13 +63,14 @@
             <div class="conversation-thread-heading">
               <div><h3 id="conversation-scene-title">Can they save pizza night?</h3><p id="conversation-scene-description">Four roles, one local model. Every reply becomes the next agent’s context.</p></div>
               <span id="conversation-turn" class="conversation-turn">0 / 8</span>
+              <button id="conversation-latest" class="button button-small" type="button" hidden>Latest reply</button>
             </div>
             <div id="conversation-scroll" class="conversation-scroll" tabindex="0" role="log" aria-label="Generated conversation, oldest reply first" aria-live="polite" aria-relevant="additions">
               <div id="conversation-empty" class="conversation-empty"><h3>No scripted dialogue.</h3><p>Start the conversation to see the actual replies. No words are shown before a reply file is published.</p></div>
               <ol id="conversation-messages" class="conversation-messages" aria-label="Agent replies"></ol>
             </div>
             <p id="conversation-activity" class="conversation-activity" role="status" aria-live="polite" aria-atomic="true">Replies are generated locally by Rust through Ollama, not by this browser.</p>
-            <div class="conversation-thread-footer"><p id="conversation-provenance">No transcript has been observed yet.</p><button id="conversation-latest" class="button button-small" type="button" hidden>Latest reply</button></div>
+            <div class="conversation-thread-footer"><p id="conversation-provenance">No transcript has been observed yet.</p></div>
           </section>
           <div id="conversation-recovery" class="conversation-recovery" hidden><strong>Continuing from saved context</strong><p id="conversation-recovery-note"></p></div>
           <div id="conversation-verification" class="verification-result" hidden><strong>Replay verified</strong><code>completed_now = 0</code><code>model_calls_now = 0</code><span id="conversation-reused"></span></div>
@@ -131,8 +137,8 @@
             <div id="database-scroll" class="database-scroll" tabindex="0" role="region" aria-labelledby="database-title" aria-describedby="database-scroll-hint">
               <p id="database-scroll-hint" class="sr-only">Scrollable records table. On narrow screens, use the arrow keys to scroll horizontally.</p>
               <table class="records-table">
-                <caption class="sr-only">Actual db_list rows in native order, with readable labels and abbreviated hashes. Enable Raw fields for exact bridge-decoded values.</caption>
-                <thead><tr><th scope="col">Task <span>ID</span></th><th scope="col">Attempt <span>VALUE</span></th><th scope="col">State <span>TAG</span></th><th scope="col">Saved references <span>CONTENT · select to inspect</span></th></tr></thead>
+                <caption class="sr-only">Actual db_list rows in native order. Select saved work to inspect it. Deep dive adds attempts, references and hashes; Raw fields shows exact bridge-decoded values.</caption>
+                <thead><tr><th scope="col">Task <span>ID</span></th><th scope="col">Attempt <span>VALUE</span></th><th scope="col">State <span>TAG</span></th><th scope="col">Saved work <span>CONTENT · select to inspect</span></th></tr></thead>
                 <tbody id="database-rows"></tbody>
               </table>
               <div id="database-empty" class="database-empty"><strong>No records read yet.</strong><p>Start a conversation to see the real asmDB records.</p></div>
@@ -168,7 +174,7 @@
         <details id="saved-conversation-work" class="saved-work">
           <summary>Saved mission &amp; jobs <span id="conversation-save-summary">Not observed yet</span></summary>
           <p class="section-help">Each job saves the role, instructions, model and prior reply IDs. Status alone cannot resume work.</p>
-          <dl class="saved-work-metadata"><div><dt>Saved topic</dt><dd id="conversation-saved-topic">Not read yet</dd></div><div><dt>Conversation definition</dt><dd><code id="conversation-definition-file">Not read yet</code></dd></div><div><dt>Definition SHA-256</dt><dd><code id="conversation-definition-hash">Not read yet</code></dd></div><div><dt>Model digest</dt><dd><code id="conversation-model-digest">Not read yet</code></dd></div></dl>
+          <dl class="saved-work-metadata"><div><dt>Saved topic</dt><dd id="conversation-saved-topic">Not read yet</dd></div><div><dt>Workflow</dt><dd><code id="conversation-workflow">Not read yet</code></dd></div><div><dt>Conversation definition</dt><dd><code id="conversation-definition-file">Not read yet</code></dd></div><div><dt>Definition SHA-256</dt><dd><code id="conversation-definition-hash">Not read yet</code></dd></div><div><dt>Model digest</dt><dd><code id="conversation-model-digest">Not read yet</code></dd></div></dl>
           <ul id="conversation-jobs" class="conversation-jobs" aria-label="Inspect persisted turn definitions"></ul>
           <p id="conversation-jobs-empty" class="section-help">Jobs appear after their references are read from asmDB.</p>
           <p class="inference-note">A saved reply can be reused. Inference lost before saving may run again.</p>

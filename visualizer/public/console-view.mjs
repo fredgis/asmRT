@@ -1,7 +1,8 @@
-export function nativeRecordFields(row, raw = false) {
+export function nativeRecordFields(row, raw = false, detail = 'deep') {
+  const overview = detail === 'overview';
   const state = /^asmrt\.v[12]\.(pending|running|completed)$/.exec(row.tag)?.[1] ?? '';
   const exact = { state, tag: row.tag, content: row.content, hashes: '' };
-  if (raw || !state) return exact;
+  if ((raw && !overview) || !state) return exact;
   let refs;
   try { refs = JSON.parse(row.content); } catch { return exact; }
   if (!refs || typeof refs !== 'object' || Array.isArray(refs)) return exact;
@@ -13,8 +14,8 @@ export function nativeRecordFields(row, raw = false) {
   return {
     state,
     tag: state,
-    content: [owner, reference].filter(Boolean).join(' / '),
-    hashes: [hash(refs.h) ? `job ${refs.h.slice(0, 8)}…` : '', hash(refs.r) ? `reply ${refs.r.slice(0, 8)}…` : ''].filter(Boolean).join('  '),
+    content: overview ? owner || reference : [owner, reference].filter(Boolean).join(' / '),
+    hashes: overview ? '' : [hash(refs.h) ? `job ${refs.h.slice(0, 8)}…` : '', hash(refs.r) ? `reply ${refs.r.slice(0, 8)}…` : ''].filter(Boolean).join('  '),
   };
 }
 

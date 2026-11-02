@@ -109,6 +109,8 @@ let artifactView = null;
 let definitionRequest = null;
 let definitionView = null;
 const chatChapters = [...document.querySelectorAll("#conversation-rail > li")];
+const detailChoices = [...document.querySelectorAll('input[name="console-detail"]')];
+let detailMode = "overview";
 const DEFAULT_TOPIC = "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";
 let lastConversation = null;
 
@@ -622,6 +624,10 @@ function renderConversationJobs(snapshot) {
   const messages = snapshot?.messages ?? [];
   text(ui.savedSummary, snapshot ? `${messages.length} disk-saved replies / ${messages.filter((message) => message.committed).length} asmDB-completed` : "Not observed yet");
   text(ui.savedTopic, snapshot?.topic ?? "Not read yet");
+  const workflow = snapshot?.workflow;
+  text(byId("conversation-workflow"), snapshot
+    ? `${workflow?.kind ?? "conversation.sequential"} / v${workflow?.version ?? 1}${workflow ? "" : " (legacy plan)"}`
+    : "Not read yet");
   text(ui.definitionFile, snapshot?.definition_file ?? "Not read yet");
   text(ui.definitionHash, snapshot?.definition_sha256 ?? "Not read yet");
   text(ui.modelDigest, snapshot?.model.digest ?? "Not read yet");
@@ -674,7 +680,7 @@ function renderConversation() {
   text(ui.conversationTurn, `${current ? active?.task_id ?? messages.length : 0} / ${total}`);
   text(ui.conversationRuntime, !current ? "Not started" : !connected ? "Process unconfirmed" : state.phase === "stopping" ? "Stopping Rust" : stopped ? "Rust stopped"
     : state.phase === "starting" ? "Opening runtime" : state.phase === "finished" ? "Rust finished"
-      : liveProcess ? `${playback?.status === "paused" ? "Paused" : "Rust"} / PID ${state.pid}` : "Awaiting runtime");
+      : liveProcess ? `${playback?.status === "paused" ? "Paused" : "Running"}${detailMode === "deep" ? ` / PID ${state.pid}` : ""}` : "Awaiting runtime");
   attribute(ui.conversationRuntime, "data-tone", stopped && connected ? "danger" : liveProcess ? "rust" : verifiedReplay() && current ? "success" : "neutral");
   const chapter = conversationChapter(scene?.id, current ? state.tasks : []);
   for (const item of chatChapters) {
@@ -702,6 +708,7 @@ function renderConversation() {
   }
   text(ui.conversationActivity, activity);
   attribute(ui.conversationActivity, "data-generating", generating);
+  attribute(ui.conversationProvenance.parentElement, "data-retained", retained);
   text(ui.conversationProvenance, !snapshot ? "Reply files appear here after publication." : retained
     ? "Last observed files. Awaiting a fresh read." : "Real reply files. Saved ≠ committed.");
   const emptyTitle = !current ? pizza ? "Dinner needs a plan." : "Give the team a problem." : stopped ? "Stopped before the first reply." : "The team is thinking.";
@@ -888,7 +895,8 @@ function renderDatabase(highlight) {
   const retained = !connected || awaitingRead || ["starting", "stopping", "interrupted", "error"].includes(state?.phase);
   attribute(ui.database, "data-retained", Boolean(db && retained));
   attribute(ui.database, "data-sequence", db?.sequence ?? "");
-  attribute(ui.database, "data-raw", ui.rawRecords.checked);
+  const raw = detailMode === "deep" && ui.rawRecords.checked;
+  attribute(ui.database, "data-raw", raw);
   const rows = db?.response.rows ?? [];
   const ids = new Set(rows.map((row) => row.id));
   for (const id of recordNodes.keys()) if (!ids.has(id)) recordNodes.delete(id);
@@ -896,7 +904,7 @@ function renderDatabase(highlight) {
     let entry = recordNodes.get(row.id);
     if (!entry) { entry = newRecordNode(row); recordNodes.set(row.id, entry); }
     const signature = JSON.stringify([row.value, row.tag, row.content]);
-    const fields = nativeRecordFields(row, ui.rawRecords.checked);
+    const fields = nativeRecordFields(row, raw, detailMode);
     text(entry.value, row.value);
     text(entry.tag, fields.tag);
     entry.tag.title = row.tag;
@@ -1205,17 +1213,17 @@ function newEventNode(event) {
   const date = new Date(event.at);
   if (!Number.isNaN(date.getTime())) { time.dateTime = event.at; time.title = date.toLocaleString("en-GB"); text(time, clock.format(date)); }
   else text(time, "Unknown time");
-  timeGroup.append(time, element("span", "", `#${event.sequence}`));
+  timeGroup.append(time, element("span", "event-detail", `#${event.sequence}`));
   const label = element("span", "event-label", eventLabels[event.event] ?? event.event);
   label.title = event.event;
   const context = element("span", "event-context");
   if (event.task_id) context.append(element("code", "", `${isConversation() ? "turn" : "task"} ${event.task_id}`));
   if (event.owner || event.agent_id) context.append(element("code", "", event.owner ?? event.agent_id));
-  if (event.attempt != null) context.append(element("span", "", `attempt ${event.attempt}`));
-  if (event.pid != null) context.append(element("code", "", `PID ${event.pid}`));
+  if (event.attempt != null) context.append(element("span", "event-detail", `attempt ${event.attempt}`));
+  if (event.pid != null) context.append(element("code", "event-detail", `PID ${event.pid}`));
   if (event.artifact) {
     const value = String(event.artifact);
-    const hash = element("code", "", value.length > 16 ? `${value.slice(0, 12)}…` : value);
+    const hash = element("code", "event-detail", value.length > 16 ? `${value.slice(0, 12)}…` : value);
     hash.title = value;
     context.append(hash);
   }
@@ -1226,7 +1234,7 @@ function newEventNode(event) {
 
 function renderEvents(freshEvents) {
   const all = state?.events ?? [];
-  const events = ui.allEvents.checked ? all : all.filter(event => !readEvents.has(event.event));
+  const events = detailMode === "deep" && ui.allEvents.checked ? all : all.filter(event => !readEvents.has(event.event));
   const visible = events.slice(-EVENT_LIMIT).reverse();
   const fresh = new Set(freshEvents.map(eventKey));
   const keys = new Set(visible.map(eventKey));
@@ -1371,6 +1379,22 @@ themeToggle.addEventListener("click", () => {
   renderTheme();
 });
 systemTheme.addEventListener("change", () => { if (!chosenTheme) renderTheme(); });
+
+try {
+  if (localStorage.getItem("asmrt-visualizer-detail") === "deep") detailMode = "deep";
+} catch { /* View switching still works without browser storage. */ }
+function renderDetail() {
+  document.documentElement.dataset.detail = detailMode;
+  for (const choice of detailChoices) choice.checked = choice.value === detailMode;
+}
+for (const choice of detailChoices) choice.addEventListener("change", () => {
+  if (!choice.checked) return;
+  detailMode = choice.value;
+  try { localStorage.setItem("asmrt-visualizer-detail", detailMode); } catch { /* Persistence is optional. */ }
+  renderDetail();
+  render();
+});
+renderDetail();
 renderTheme();
 render();
 void poll();

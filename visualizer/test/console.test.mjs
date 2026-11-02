@@ -11,13 +11,23 @@ test('readable records decode only native fields, keep hashes distinct, and expo
   assert.deepEqual(nativeRecordFields({ ...row, tag: 'asmrt.v1.completed', content: '{"o":"worker-1","r":"artifact:5"}' }), { state: 'completed', tag: 'completed', content: 'worker-1 / artifact:5', hashes: '' });
 });
 
+test('overview hides technical references and hashes even after raw mode, without changing the native record', () => {
+  const before = JSON.stringify(row);
+  assert.deepEqual(nativeRecordFields(row, true, 'overview'), { state: 'completed', tag: 'completed', content: 'planner', hashes: '' });
+  assert.deepEqual(nativeRecordFields({ ...row, tag: 'asmrt.v2.pending', content: '{"d":"job:7","h":"' + 'a'.repeat(64) + '"}' }, false, 'overview'), { state: 'pending', tag: 'pending', content: 'job:7', hashes: '' });
+  assert.equal(JSON.stringify(row), before);
+  assert.equal(nativeRecordFields(row, true, 'deep').content, row.content);
+});
+
 test('unknown or malformed records remain exact rather than acquiring invented references', () => {
   for (const changed of [{ tag: 'other.completed' }, { content: 'not JSON' }, { content: 'null' }, { content: '[]' }, { content: '{"d":42}' }]) {
     const input = { ...row, ...changed };
-    const result = nativeRecordFields(input);
-    assert.equal(result.tag, input.tag);
-    assert.equal(result.content, input.content);
-    assert.equal(result.hashes, '');
+    for (const detail of ['overview', 'deep']) {
+      const result = nativeRecordFields(input, false, detail);
+      assert.equal(result.tag, input.tag);
+      assert.equal(result.content, input.content);
+      assert.equal(result.hashes, '');
+    }
   }
 });
 

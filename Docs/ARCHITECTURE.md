@@ -431,7 +431,11 @@ Controller: [server.mjs](../visualizer/server.mjs). The browser is a view of the
 
 ### One console, distinct evidence
 
-The console places the **asmRT conversation/execution view and asmDB record view side by side**, with an event dock available without switching tabs. This is one presentation of the same run, not independent execution modes connected to different databases.
+The console places the **asmRT conversation/execution view and asmDB record view side by side**, with an event dock available without switching between them. This is one presentation of the same run, not independent execution modes connected to different databases.
+
+**Overview** is the default: larger agent portraits, full replies and a compact native-record listing. **Deep dive** adds the recovery rail, attempts, input references, timings, hashes, exact raw-field option and read/checkpoint events. Both retain the same panes, observed state and inspectable saved work. The native radio selection is keyboard-operable and stored only in browser local storage; switching views does not issue a runtime command or model call. A previously checked raw-field option cannot spill technical JSON into Overview. Errors and retained-state notices remain visible in both modes.
+
+The first agent workflow is [**`conversation.sequential`, version 1**](WORKFLOWS.md), not a generic workflow engine. The saved-plan inspector identifies its effective type separately from the task-handler version.
 
 Three different observations must remain distinguishable:
 

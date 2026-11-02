@@ -92,10 +92,28 @@ struct Job {
     instruction: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Workflow {
+    kind: String,
+    version: u32,
+}
+
+impl Workflow {
+    fn sequential() -> Self {
+        Self {
+            kind: "conversation.sequential".into(),
+            version: 1,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
     schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow: Option<Workflow>,
     topic: String,
     model: Model,
     agents: Vec<Agent>,
@@ -365,7 +383,14 @@ fn saved_instruction(topic: &str, id: u64, total: u64) -> String {
 }
 
 impl Plan {
+    fn effective_workflow(&self) -> Workflow {
+        self.workflow.clone().unwrap_or_else(Workflow::sequential)
+    }
+
     fn validate(&self) -> CliResult<()> {
+        if self.effective_workflow() != Workflow::sequential() {
+            return Err(invalid("unsupported saved conversation workflow kind or version").into());
+        }
         if self.schema != "asmrt.conversation.v1"
             || !(1..=3).contains(&self.rounds)
             || self.topic.trim().is_empty()
@@ -505,6 +530,7 @@ impl Plan {
             .collect();
         let plan = Self {
             schema: "asmrt.conversation.v1".into(),
+            workflow: Some(Workflow::sequential()),
             topic,
             model,
             agents,
@@ -761,7 +787,7 @@ pub(crate) async fn run(
                 .map(task_view)
                 .collect::<asmrt::Result<Vec<_>>>()?
         );
-        ready["conversation"] = json!({"schema":plan.schema,"topic":plan.topic,"model":plan.model,"agents":plan.agents,"rounds":plan.rounds,
+        ready["conversation"] = json!({"schema":plan.schema,"workflow":plan.effective_workflow(),"topic":plan.topic,"model":plan.model,"agents":plan.agents,"rounds":plan.rounds,
             "turns_total":plan.turns.len(),"definition_file":"conversation.json","definition_sha256":plan_sha256,
             "messages":history.iter().map(|saved| { let mut value = serde_json::to_value(&saved.reply).expect("serializable reply"); value["committed"] = json!(true); value["reused"] = json!(true); value }).collect::<Vec<_>>(),"active":null});
     }
@@ -890,6 +916,7 @@ mod tests {
             .collect();
         Plan {
             schema: "asmrt.conversation.v1".into(),
+            workflow: None,
             topic,
             model,
             agents,
@@ -1030,6 +1057,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_plans_persist_sequential_workflow_metadata() {
+        let directory = fixture_directory();
+        let plan = prepare_new(directory.path(), None, None).await;
+        let stored: Value =
+            serde_json::from_slice(&fs::read(directory.path().join("conversation.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            stored["workflow"],
+            json!({"kind":"conversation.sequential","version":1})
+        );
+        assert_eq!(plan.workflow, Some(Workflow::sequential()));
+    }
+
+    #[tokio::test]
+    async fn unsupported_workflows_are_rejected_without_preparing_saved_work() {
+        for (kind, version) in [
+            ("conversation.unknown", 1),
+            ("conversation.sequential", 0),
+            ("conversation.sequential", 2),
+        ] {
+            let directory = fixture_directory();
+            let mut plan = legacy_plan(3);
+            plan.workflow = Some(Workflow {
+                kind: kind.into(),
+                version,
+            });
+            let filename = directory.path().join("conversation.json");
+            publish(&filename, &serde_json::to_vec(&plan).unwrap()).unwrap();
+            let paths = [filename];
+            let before = snapshot(&paths);
+            let error = Plan::prepare(directory.path(), &options(), true)
+                .await
+                .err()
+                .expect("an unsupported workflow must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "unsupported saved conversation workflow kind or version"
+            );
+            assert_eq!(snapshot(&paths), before);
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn default_update_is_persisted_before_round_two_and_reused_on_resume() {
         for topic in [None, Some(DEFAULT_TOPIC)] {
             let directory = fixture_directory();
@@ -1086,7 +1157,14 @@ mod tests {
                 job.topic = original.topic.clone();
             }
             let filename = directory.path().join("conversation.json");
-            publish(&filename, &serde_json::to_vec(&original).unwrap()).unwrap();
+            let original_bytes = serde_json::to_vec(&original).unwrap();
+            assert!(
+                serde_json::from_slice::<Value>(&original_bytes)
+                    .unwrap()
+                    .get("workflow")
+                    .is_none()
+            );
+            publish(&filename, &original_bytes).unwrap();
             let mut paths = vec![filename];
             let mut history = Vec::new();
             for job in &original.turns {
@@ -1100,9 +1178,12 @@ mod tests {
                 history.push(saved);
             }
             let before = snapshot(&paths);
-            let (restored, _) = Plan::prepare(directory.path(), &options(), true)
+            let (restored, plan_sha256) = Plan::prepare(directory.path(), &options(), true)
                 .await
                 .unwrap();
+            assert!(restored.workflow.is_none());
+            assert_eq!(restored.effective_workflow(), Workflow::sequential());
+            assert_eq!(plan_sha256, digest(&before[0].0));
             assert_eq!(serde_json::to_vec(&restored).unwrap(), before[0].0);
             let mut loaded = Vec::new();
             for job in &restored.turns {

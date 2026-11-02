@@ -6,6 +6,8 @@
 
 A **Rust runtime prototype over [asmDB](https://github.com/fredgis/asmDB)**. Four agents have a real local-model conversation. Kill Rust halfway through; restart it; they continue from saved instructions and replies.
 
+**[asmDB — the assembly database behind asmRT →](https://github.com/fredgis/asmDB)**
+
 **Local POC · Windows x86-64 verified · asmDB unchanged · no cloud key**
 
 ![The wide console: agent conversation beside actual asmDB records, with live events underneath](Docs/assets/screenshots/conversation.png)
@@ -39,12 +41,20 @@ The prompts request short replies. Each saved reply stays on screen for at least
 
 ### Reading the console
 
-- **asmRT, left:** the four illustrated agents and their actual saved replies.
-- **asmDB, right:** real `db_list` results through the existing writer connection. **Raw fields** shows exact bridge-decoded values.
+- **Overview** opens first: large agent portraits, full replies on the left, compact asmDB records on the right.
+- **Deep dive** keeps the same two panes and adds attempts, inputs, timings and hashes. **Raw fields** shows exact bridge-decoded values.
 - **Live events, below:** runtime/controller observations, always visible on desktop. This is **not CDC**.
-- **Select a record or reply:** inspect its saved job and JSON. **Controls & files** contains manual controls and the no-LLM storage demo.
+- **Select saved work** to inspect its job and JSON; Deep dive also has per-reply inspector buttons. **Controls & files** holds manual controls and the no-LLM storage demo.
+
+Switching views is local and remembers your preference. It does not restart or advance the conversation.
+
+![Deep dive: the same real paused conversation with technical details exposed](Docs/assets/screenshots/deep-dive.png)
 
 Conversation and records scroll independently. On narrow screens the panes stack. Refreshing the browser does not restart the run. Pausing holds future steps; it does not cancel an inference request already running.
+
+### First workflow: sequential conversation
+
+**`conversation.sequential`, version 1:** Planner → Builder → Critic → Editor, repeated for each round. Rust gives each role **all earlier saved replies**, then saves and commits its response before the next turn. Agents do not fetch messages independently; one runtime orchestrates one model call at a time. Parallel and conditional workflows are not implemented yet. See the [workflow contract](Docs/WORKFLOWS.md).
 
 ## How does it know what to resume?
 
