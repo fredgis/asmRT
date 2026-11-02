@@ -24,7 +24,7 @@ The agents plan pizza night for eight friends on $40. In round two, the oven bre
 
 Replies 1–4 survive. Turn 5 retries and the conversation continues. A final replay reports `completed_now = 0` and `model_calls_now = 0`: completed work did not run again.
 
-**Overview** keeps the story playful: large robots, a speech bubble and visual memory. Browse saved replies with the arrows or memory tiles; **Follow latest** returns to the current reply. A check means the native database reported completion, not merely that a reply file exists.
+**Overview** keeps the story playful: large robots, the full conversation colored by agent, and visual memory. Memory tiles jump to a reply; **Latest reply** returns to the end of the conversation. A check means the native database reported completion, not merely that a reply file exists.
 
 **Details** shows the full conversation beside asmDB, with an event dock below them. Inspect the saved instructions, attempts and replies. [See the technical console and recovery evidence](Docs/ARCHITECTURE.md#7-browser-controller-and-observable-evidence).
 

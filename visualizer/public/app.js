@@ -4,10 +4,9 @@ const byId = (id) => document.getElementById(id);
 const ui = {
   conversation: byId("conversation-view"), storageStory: byId("storage-story"),
   overview: byId("overview-stage"), overviewTitle: byId("overview-title"), overviewTopic: byId("overview-topic"),
-  overviewStatus: byId("overview-status"), overviewReply: byId("overview-reply"), overviewSpeaker: byId("overview-speaker"),
-  overviewMessage: byId("overview-message"), overviewReplyState: byId("overview-reply-state"), overviewReplyScroll: byId("overview-reply-scroll"),
-  overviewNavigation: byId("overview-reply-navigation"), overviewPosition: byId("overview-reply-position"),
-  overviewPrevious: byId("overview-previous"), overviewNext: byId("overview-next"), overviewLatest: byId("overview-latest"),
+  overviewStatus: byId("overview-status"), overviewMessages: byId("overview-messages"),
+  overviewMessage: byId("overview-message"), overviewReplyScroll: byId("overview-reply-scroll"),
+  overviewNavigation: byId("overview-reply-navigation"), overviewPosition: byId("overview-reply-position"), overviewLatest: byId("overview-latest"),
   memory: byId("overview-memory"), memoryCells: byId("overview-memory-cells"), memoryCount: byId("overview-memory-count"),
   memoryTotal: byId("overview-memory-total"), memoryNote: byId("overview-memory-note"), overviewProof: byId("overview-proof"),
   reset: byId("reset-demo"), resetDialog: byId("reset-dialog"), resetCancel: byId("cancel-reset"), resetConfirm: byId("confirm-reset"),
@@ -91,6 +90,7 @@ const publicationRevisions = new Map();
 const artifactCache = new Map();
 const definitionCache = new Map();
 const messageNodes = new Map();
+const overviewMessageNodes = new Map();
 const jobNodes = new Map();
 const memoryNodes = new Map();
 const overviewAgents = [...document.querySelectorAll("#overview-agents > li")].map(root => ({
@@ -367,6 +367,9 @@ function acceptState(next) {
     definitionView = null;
     lastConversation = null;
     selectedOverviewReply = null;
+    overviewMessageNodes.clear();
+    ui.overviewMessages.replaceChildren();
+    ui.overviewReplyScroll.scrollTop = 0;
     memoryNodes.clear();
     ui.memoryCells.replaceChildren();
     artifactCache.clear();
@@ -766,8 +769,6 @@ function renderOverview() {
   const topic = snapshot?.topic ?? (current ? state.run.topic : ui.topic.value.trim());
   const pizza = topic === DEFAULT_TOPIC;
   const cells = conversationMemory(snapshot, current ? state.database?.response : null, total);
-  const shownId = ui.overviewReply.dataset.replyId;
-  if (selectedOverviewReply === null && shownId && ui.overviewReplyScroll.contains(document.activeElement)) selectedOverviewReply = shownId;
   let index = messages.findIndex(message => message.task_id === selectedOverviewReply);
   if (index < 0) { selectedOverviewReply = null; index = messages.length - 1; }
   const message = messages[index];
@@ -805,24 +806,35 @@ function renderOverview() {
     attribute(agent.root, "data-thinking", thinking);
     attribute(agent.root, "data-selected", selected);
   }
-  const speakerSlot = Math.max(0, overviewAgents.findIndex(agent => agent.id === message?.agent_id));
-  ui.overviewReply.style.setProperty("--speaker-slot", speakerSlot);
-  ui.overviewReply.style.setProperty("--speaker-mobile-slot", speakerSlot % 2);
-  attribute(ui.overviewReply, "data-speaker", message?.agent_id ?? "");
-  attribute(ui.overviewReply, "data-reply-id", message?.task_id ?? "");
-  text(ui.overviewSpeaker, message ? `${message.agent_name} says` : current ? "No reply yet." : pizza ? "Dinner needs a plan." : "Ready for a new mission.");
-  text(ui.overviewMessage, message?.text ?? (current ? "Waiting for a complete reply. Nothing is prewritten." : "Press Start conversation. The robots take it from here."));
-  const memoryState = cells.find(cell => cell.id === message?.task_id)?.status;
-  text(ui.overviewReplyState, !message ? "" : memoryState === "committed" ? "Committed"
-    : memoryState === "unknown" ? "Record needs inspection" : message.committed ? "Awaiting DB read" : "Saved, awaiting commit");
-  attribute(ui.overviewReplyState, "data-state", memoryState ?? "");
+  const scroll = ui.overviewReplyScroll;
+  const previousLatest = ui.overviewMessages.lastElementChild?.dataset.replyId;
+  const follow = selectedOverviewReply === null && !scroll.contains(document.activeElement)
+    && scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 48;
+  const replyIds = new Set(messages.map(reply => reply.task_id));
+  for (const id of overviewMessageNodes.keys()) if (!replyIds.has(id)) overviewMessageNodes.delete(id);
+  const replies = messages.map(reply => {
+    let entry = overviewMessageNodes.get(reply.task_id);
+    if (!entry) {
+      const root = element("li", "conversation-message overview-message");
+      root.dataset.replyId = reply.task_id;
+      const speaker = element("h4", "message-speaker");
+      const body = element("p", "message-text");
+      root.append(speaker, body);
+      entry = { root, speaker, body };
+      overviewMessageNodes.set(reply.task_id, entry);
+    }
+    attribute(entry.root, "data-speaker", reply.agent_id);
+    text(entry.speaker, reply.agent_name);
+    text(entry.body, reply.text);
+    return entry.root;
+  });
+  reconcileChildren(ui.overviewMessages, replies);
+  ui.overviewMessage.hidden = messages.length > 0;
+  text(ui.overviewMessage, current ? "Waiting for a complete reply. Nothing is prewritten." : "Press Start conversation. The robots take it from here.");
   ui.overviewNavigation.hidden = messages.length === 0;
-  ui.overviewPrevious.disabled = index <= 0;
-  ui.overviewNext.disabled = index >= messages.length - 1;
-  ui.overviewLatest.hidden = selectedOverviewReply === null;
-  text(ui.overviewPosition, messages.length ? `${index + 1} / ${messages.length}` : "");
-  attribute(ui.overviewPosition, "aria-label", messages.length ? `Saved reply ${index + 1} of ${messages.length}` : "No saved replies");
-  if (shownId !== message?.task_id && !ui.overviewReplyScroll.contains(document.activeElement)) ui.overviewReplyScroll.scrollTop = 0;
+  ui.overviewLatest.hidden = messages.length < 2;
+  text(ui.overviewPosition, `${messages.length} ${messages.length === 1 ? "reply" : "replies"}`);
+  if (previousLatest && previousLatest !== messages.at(-1)?.task_id && follow) scroll.scrollTop = scroll.scrollHeight;
 
   const labels = { committed: "Committed in asmDB", saved: "Reply saved; native completion not observed", assigned: "Assigned", waiting: "Pending", unobserved: "Not observed", unknown: "Unrecognized native record" };
   const marks = { committed: "✓", saved: "○", assigned: "…", waiting: "·", unobserved: "·", unknown: "?" };
@@ -1435,25 +1447,17 @@ bindCommand(ui.reset, () => { if (actionAllowed("reset")) { ui.resetDialog.showM
 ui.resetCancel.addEventListener("click", () => ui.resetDialog.close());
 ui.resetDialog.addEventListener("close", () => { if (!ui.reset.disabled) ui.reset.focus({ preventScroll: true }); else focusPrimary(); });
 bindCommand(ui.resetConfirm, () => { if (actionAllowed("reset")) { ui.resetDialog.close(); void performAction("reset"); } });
-function moveOverviewReply(offset) {
-  const messages = conversationSnapshot()?.messages ?? [];
-  const current = messages.findIndex(message => message.task_id === ui.overviewReply.dataset.replyId);
-  const target = messages[current + offset];
-  if (!target) return;
-  selectedOverviewReply = target.task_id;
+ui.overviewLatest.addEventListener("click", () => {
+  selectedOverviewReply = null;
   renderOverview();
-}
-ui.overviewPrevious.addEventListener("click", () => moveOverviewReply(-1));
-ui.overviewNext.addEventListener("click", () => moveOverviewReply(1));
-ui.overviewLatest.addEventListener("click", () => { selectedOverviewReply = null; renderOverview(); });
-ui.overviewReplyScroll.addEventListener("wheel", () => {
-  if (ui.overviewReply.dataset.replyId) selectedOverviewReply = ui.overviewReply.dataset.replyId;
-}, { passive: true });
+  ui.overviewReplyScroll.scrollTop = ui.overviewReplyScroll.scrollHeight;
+});
 ui.memoryCells.addEventListener("click", event => {
   const button = event.target.closest("button[data-overview-reply]");
   if (!button || !ui.memoryCells.contains(button) || button.disabled) return;
   selectedOverviewReply = button.dataset.overviewReply;
   renderOverview();
+  overviewMessageNodes.get(selectedOverviewReply)?.root.scrollIntoView({ block: "nearest" });
 });
 ui.rawRecords.addEventListener("change", () => renderDatabase(false));
 ui.allEvents.addEventListener("change", () => renderEvents([]));

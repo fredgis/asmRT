@@ -62,13 +62,14 @@
               <li class="overview-agent" data-agent-id="editor" data-worker-slot="3"><div class="worker-portrait" role="img" aria-label="Lavender Editor robot"></div><h3>Editor</h3><p class="overview-agent-status"></p></li>
             </ol>
             <section id="overview-reply" class="overview-reply" aria-labelledby="overview-speaker">
-              <div class="overview-reply-heading"><h3 id="overview-speaker">Dinner needs a plan.</h3><span id="overview-reply-state"></span></div>
-              <div id="overview-reply-scroll" class="overview-reply-scroll" tabindex="0" role="region" aria-label="Full saved reply"><p id="overview-message" aria-live="polite" aria-atomic="true">Press Start conversation. The robots take it from here.</p></div>
+              <div class="overview-reply-heading"><h3 id="overview-speaker">Conversation</h3></div>
+              <div id="overview-reply-scroll" class="overview-reply-scroll" tabindex="0" role="log" aria-label="Full conversation, oldest reply first" aria-live="polite" aria-relevant="additions">
+                <p id="overview-message">Press Start conversation. The robots take it from here.</p>
+                <ol id="overview-messages" class="conversation-messages" aria-label="All saved agent replies"></ol>
+              </div>
               <div id="overview-reply-navigation" class="overview-reply-navigation" hidden>
-                <button id="overview-previous" class="button reply-arrow" type="button" aria-label="Previous saved reply">←</button>
                 <span id="overview-reply-position" role="status" aria-live="polite"></span>
-                <button id="overview-next" class="button reply-arrow" type="button" aria-label="Next saved reply">→</button>
-                <button id="overview-latest" class="button button-small" type="button" hidden>Follow latest</button>
+                <button id="overview-latest" class="button button-small" type="button" hidden>Latest reply</button>
               </div>
             </section>
           </section>
