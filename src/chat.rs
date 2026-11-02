@@ -19,7 +19,9 @@ use crate::{
     wait_for_step,
 };
 
-const DEFAULT_TOPIC: &str = "Plan a free outdoor neighborhood book swap this Saturday. We have one table, two volunteers, and a chance of rain. Agree on the exchange rules, who does what, and a rain backup.";
+const DEFAULT_TOPIC: &str =
+    "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";
+const ROUND_TWO_UPDATE: &str = "The oven just broke. Save dinner without an oven.";
 const MAX_FILE: usize = 128 * 1024;
 const AGENT_IDS: [&str; 4] = ["planner", "builder", "critic", "editor"];
 
@@ -280,43 +282,86 @@ async fn installed_digest(client: &Client, base_url: &str, name: &str) -> CliRes
 
 fn agents() -> Vec<Agent> {
     [
-        ("planner", "Planner", "Choose a concrete goal and make decisions"),
-        ("builder", "Builder", "Turn the proposals into useful resources and practical steps"),
-        ("critic", "Critic", "Spot a specific practical weakness and offer a constructive fix"),
-        ("editor", "Editor", "Combine the others' proposals into one shared plan"),
+        ("planner", "Planner", "Be decisive and pick a practical plan"),
+        ("builder", "Builder", "Make the plan doable and volunteer for a job"),
+        ("critic", "Critic", "Challenge one weak spot and offer a practical fix"),
+        ("editor", "Editor", "Settle the disagreement and confirm what we will do"),
     ].into_iter().map(|(id, name, role)| Agent {
         id: id.into(), name: name.into(), role: role.into(),
-        prompt: format!("You are {name} in a group discussion. Your role: {role}. Talk directly to your teammates in first person, in one or two short sentences, at most 50 English words. Respond to the others' actual ideas. Only write your own chat message, without a speaker label or transcript."),
+        prompt: format!("You are {name} in a casual team chat. {role}. Write 1 or 2 short English sentences, about 12-28 words total. Answer a teammate's actual idea when there is one. Make one concrete decision, not a report or a question. No lists, headings, or speaker labels."),
     }).collect()
 }
 
 fn turn_instruction(id: u64, total: u64) -> &'static str {
     if id == 1 {
-        return "Propose one concrete approach to reach the goal. Say what we should actually do. Give a concrete proposal, not a question.";
+        return "Pick one concrete plan that fits our goal. Offer it to the group, not a question.";
     }
     if id == total {
-        return "Close the discussion with the agreed plan, who does what, and how the main concern was addressed. Use the actual proposals, with no new topic or questions.";
+        return "Confirm the plan we agreed on and split the jobs between us. Settle the remaining concern; do not add a new idea.";
     }
     match (id - 1) % 4 {
         0 => {
-            "Respond to Editor's suggestion and Critic's concern. Make one clear decision using the constraints in the goal. Stay with the same proposal."
+            "Answer Editor and Critic. Pick one clear next move that fits the goal and any new information."
         }
         1 if id <= 4 => {
-            "Answer Planner's proposal with the resources and two practical steps. Give an answer, not another question."
+            "Answer Planner by name. Volunteer for one job and name one practical step."
         }
         1 => {
-            "Respond to Planner's decision. Explain how you would carry it out, adding one useful new detail. Do not repeat your earlier reply."
+            "Answer Planner's new decision. Claim a useful job and add one concrete detail instead of repeating yourself."
         }
         2 if id <= 4 => {
-            "Identify one specific weakness in Builder's proposal. Use the constraints in the goal and suggest a practical fix, not a different proposal."
+            "Push back on one practical weakness in Builder's idea, then suggest a fix."
         }
         2 => {
-            "Check Builder's revised plan against the original constraints. State what remains problematic or why it is now acceptable. Do not invent new constraints."
+            "Check Builder's revised plan against the goal and any new information. Accept it if it works, or give one small fix."
         }
-        _ => {
-            "Connect Builder's proposal with Critic's concern. Recommend one concrete next step for Planner."
-        }
+        _ => "Answer Critic and Builder. Settle their disagreement with one clear next step.",
     }
+}
+
+fn saved_instruction(topic: &str, id: u64, total: u64) -> String {
+    // Only new plans use these defaults; replay reads each job's saved instruction.
+    let instruction = if topic != DEFAULT_TOPIC {
+        turn_instruction(id, total)
+    } else {
+        match id {
+            1 => {
+                "Pick a simple pizza topping and a number of pizzas for eight. Give Builder one specific job."
+            }
+            2 => {
+                "Answer Planner by name. Say which ingredient you'll buy and take one preparation job."
+            }
+            3 => {
+                "Push back on Builder's spending and suggest one cheaper topping. Address Builder directly."
+            }
+            4 => {
+                "Settle the topping disagreement and assign pizza preparation to a named teammate."
+            }
+            _ if id == total => {
+                "Confirm the cold dinner we chose. Name who buys the ingredients, who assembles dinner, and who serves."
+            }
+            _ => match (id - 1) % 4 {
+                0 => {
+                    "Choose one cold dinner: sandwiches, wraps, or salad. Tell Builder one ingredient to buy."
+                }
+                1 => {
+                    "Answer Planner's cold dinner choice. Say which ingredient you'll buy and what you'll do with it."
+                }
+                2 => {
+                    "Check Builder's cold dinner for eight people within $40. Accept it or suggest one simple fix."
+                }
+                _ => {
+                    "Settle Critic's concern about the cold dinner. Give Planner one concrete adjustment for feeding eight."
+                }
+            },
+        }
+    };
+    let update = if topic == DEFAULT_TOPIC && id > 4 {
+        format!("{ROUND_TWO_UPDATE} ")
+    } else {
+        String::new()
+    };
+    format!("{update}{instruction} Keep your whole reply to about 20 words.")
 }
 
 impl Plan {
@@ -455,7 +500,7 @@ impl Plan {
                 topic: topic.clone(),
                 model: model.clone(),
                 input_ids: (1..id).map(|previous| previous.to_string()).collect(),
-                instruction: turn_instruction(id, total).into(),
+                instruction: saved_instruction(&topic, id, total),
             })
             .collect();
         let plan = Self {
@@ -800,4 +845,285 @@ pub(crate) async fn run(
     summary["model_calls_now"] = json!(calls);
     summary["reused_replies_now"] = json!(reused);
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_plan(version: u32) -> Plan {
+        let model = Model {
+            provider: "ollama".into(),
+            name: "qwen3.5:0.8b".into(),
+            digest: "a".repeat(64),
+            base_url: "http://127.0.0.1:0".into(),
+            num_ctx: 4096,
+            num_predict: 160,
+            temperature: 0.5,
+            seed: 42,
+        };
+        let agents: Vec<_> = AGENT_IDS
+            .iter()
+            .zip(["Planner", "Builder", "Critic", "Editor"])
+            .map(|(id, name)| Agent {
+                id: (*id).into(),
+                name: name.into(),
+                role: format!("Saved {name} role"),
+                prompt: format!(
+                    "Saved {name} instructions: one or two sentences, at most 50 words."
+                ),
+            })
+            .collect();
+        let topic = "Plan a book swap with a rain backup.".to_string();
+        let turns = (1..=8)
+            .map(|id| Job {
+                schema: "asmrt.task.v1".into(),
+                kind: "llm.chat.turn".into(),
+                version,
+                id,
+                agent: agents[(id as usize - 1) % 4].clone(),
+                topic: topic.clone(),
+                model: model.clone(),
+                input_ids: (1..id).map(|previous| previous.to_string()).collect(),
+                instruction: format!("Saved instruction for turn {id}."),
+            })
+            .collect();
+        Plan {
+            schema: "asmrt.conversation.v1".into(),
+            topic,
+            model,
+            agents,
+            rounds: 2,
+            turns,
+        }
+    }
+
+    fn saved_reply(job: &Job, history: &[SavedReply]) -> SavedReply {
+        let text = format!("{}'s saved reply for turn {}.", job.agent.name, job.id);
+        let reply = Reply {
+            schema: "asmrt.chat.reply.v1".into(),
+            task_id: job.id.to_string(),
+            agent_id: job.agent.id.clone(),
+            agent_name: job.agent.name.clone(),
+            model: job.model.name.clone(),
+            model_digest: job.model.digest.clone(),
+            job_sha256: job_reference(job).unwrap().sha256().into(),
+            request_sha256: digest(&serde_json::to_vec(&request(job, history).unwrap()).unwrap()),
+            input_ids: job.input_ids.clone(),
+            input_sha256: history.iter().map(|saved| saved.sha256.clone()).collect(),
+            text_sha256: digest(text.as_bytes()),
+            text,
+            prompt_tokens: 100,
+            completion_tokens: 12,
+            duration_ms: 50,
+            created_at_ms: 1234 + job.id,
+        };
+        SavedReply {
+            sha256: digest(&serde_json::to_vec(&reply).unwrap()),
+            reply,
+        }
+    }
+
+    fn options() -> Options {
+        Options {
+            topic: None,
+            model: None,
+            ollama_url: None,
+            rounds: None,
+            events: false,
+            guided: false,
+        }
+    }
+
+    fn fixture_directory() -> tempfile::TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        fs::create_dir_all(&root).unwrap();
+        tempfile::Builder::new()
+            .prefix("chat-test-")
+            .tempdir_in(root)
+            .unwrap()
+    }
+
+    fn snapshot(paths: &[PathBuf]) -> Vec<(Vec<u8>, SystemTime)> {
+        paths
+            .iter()
+            .map(|path| {
+                (
+                    fs::read(path).unwrap(),
+                    fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    async fn prepare_new(directory: &Path, topic: Option<&str>, rounds: Option<u8>) -> Plan {
+        use std::{io::BufRead, net::TcpListener, thread};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(5) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("model-tag fixture was not requested: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = io::BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /api/tags "));
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body =
+                json!({"models":[{"name":"qwen3.5:0.8b","digest":"a".repeat(64)}]}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let result = Plan::prepare(
+            directory,
+            &Options {
+                topic: topic.map(str::to_owned),
+                ollama_url: Some(format!("http://{address}")),
+                rounds,
+                ..options()
+            },
+            false,
+        )
+        .await;
+        server.join().unwrap();
+        result.unwrap().0
+    }
+
+    #[test]
+    fn saved_request_serialization_matches_original_handlers() {
+        // Captured from the unchanged v1/v2/v3 handlers before the scenario update.
+        let expected = [
+            "d54f2a645919c5591db779f1d5700a68e659deb4d9c7184648ed2b259bf84ab7",
+            "09b94fdfa51b3615c69db352b2f956a3d4ff010ac752995b81528e5b6ee30a7f",
+            "f98804454b9fc9f604b94087a2d9f8e99b26d592a8c215efbdcf65794c8dd5d0",
+        ];
+        for (version, expected) in (1..=3).zip(expected) {
+            let plan = legacy_plan(version);
+            let mut history = Vec::new();
+            for job in &plan.turns[..4] {
+                history.push(saved_reply(job, &history));
+            }
+            let bytes = serde_json::to_vec(&request(&plan.turns[4], &history).unwrap()).unwrap();
+            assert_eq!(digest(&bytes), expected, "handler v{version}");
+        }
+    }
+
+    #[tokio::test]
+    async fn default_update_is_persisted_before_round_two_and_reused_on_resume() {
+        for topic in [None, Some(DEFAULT_TOPIC)] {
+            let directory = fixture_directory();
+            let plan = prepare_new(directory.path(), topic, None).await;
+            assert_eq!(plan.topic, DEFAULT_TOPIC);
+            assert_eq!(plan.turns.len(), 8);
+            let filename = directory.path().join("conversation.json");
+            let stored: Plan = serde_json::from_slice(&fs::read(&filename).unwrap()).unwrap();
+            for job in &stored.turns {
+                assert_eq!(job.instruction.starts_with(ROUND_TWO_UPDATE), job.id > 4);
+            }
+            let paths = [filename];
+            let before = snapshot(&paths);
+            // The tag fixture has shut down: loading a saved run must not contact it.
+            let (resumed, _) = Plan::prepare(directory.path(), &options(), true)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_vec(&resumed).unwrap(), before[0].0);
+            assert_eq!(snapshot(&paths), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_topics_and_single_round_runs_do_not_get_the_default_update() {
+        for (topic, rounds) in [
+            (Some("Plan a book swap at the library."), None),
+            (Some("Pizza night for two. Pick dinner."), None),
+            (None, Some(1)),
+        ] {
+            let directory = fixture_directory();
+            prepare_new(directory.path(), topic, rounds).await;
+            let stored: Plan = serde_json::from_slice(
+                &fs::read(directory.path().join("conversation.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(stored.topic, topic.unwrap_or(DEFAULT_TOPIC));
+            assert!(
+                stored
+                    .turns
+                    .iter()
+                    .all(|job| !job.instruction.contains(ROUND_TWO_UPDATE))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_prefixes_validate_offline_without_rewriting_saved_files() {
+        for version in 1..=3 {
+            let directory = fixture_directory();
+            let mut original = legacy_plan(version);
+            // Even a saved custom topic identical to today's default keeps its old instructions.
+            original.topic = DEFAULT_TOPIC.into();
+            for job in &mut original.turns {
+                job.topic = original.topic.clone();
+            }
+            let filename = directory.path().join("conversation.json");
+            publish(&filename, &serde_json::to_vec(&original).unwrap()).unwrap();
+            let mut paths = vec![filename];
+            let mut history = Vec::new();
+            for job in &original.turns {
+                let definition = definition_path(directory.path(), job.id);
+                publish(&definition, &serde_json::to_vec(job).unwrap()).unwrap();
+                paths.push(definition);
+                let saved = saved_reply(job, &history);
+                let artifact = artifact_path(directory.path(), job.id);
+                publish(&artifact, &serde_json::to_vec(&saved.reply).unwrap()).unwrap();
+                paths.push(artifact);
+                history.push(saved);
+            }
+            let before = snapshot(&paths);
+            let (restored, _) = Plan::prepare(directory.path(), &options(), true)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), before[0].0);
+            let mut loaded = Vec::new();
+            for job in &restored.turns {
+                let saved = load_reply(directory.path(), job, &loaded).unwrap().unwrap();
+                assert_eq!(saved.sha256, history[loaded.len()].sha256);
+                publish(
+                    &definition_path(directory.path(), job.id),
+                    &serde_json::to_vec(job).unwrap(),
+                )
+                .unwrap();
+                loaded.push(saved);
+            }
+            let fifth = &restored.turns[4];
+            assert!(load_reply(directory.path(), fifth, &loaded[..3]).is_err());
+            let first_hash = loaded[0].sha256.clone();
+            loaded[0].sha256 = "b".repeat(64);
+            assert!(load_reply(directory.path(), fifth, &loaded[..4]).is_err());
+            loaded[0].sha256 = first_hash;
+            loaded[1].reply.text.push_str(" Changed history.");
+            assert!(load_reply(directory.path(), fifth, &loaded[..4]).is_err());
+            assert_eq!(snapshot(&paths), before);
+        }
+    }
 }

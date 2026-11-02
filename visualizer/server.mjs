@@ -16,6 +16,7 @@ const checkpointStages = new Set(['ready', 'claimed', 'published', 'completed'])
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/console-view.mjs', ['console-view.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/workers.png', ['workers.png', 'image/png']],
 ]);

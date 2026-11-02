@@ -18,30 +18,22 @@
         <div class="brand" aria-label="asmRT live demo">
           <span class="brand-mark" aria-hidden="true">[<span>:</span>]</span>
           <span class="wordmark">asm<span>RT</span></span>
-          <span class="local-label">Live demo</span>
+          <h1 class="local-label">Agents stop. Work survives.</h1>
         </div>
         <div class="header-controls">
           <span id="connection-status" class="connection-status" data-connected="false" role="status" aria-live="polite">Connecting</span>
+          <button id="open-controls" class="button button-small" type="button" aria-haspopup="dialog" aria-controls="controls-dialog">Controls &amp; files</button>
           <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false"><span aria-hidden="true">◐</span><span>Dark mode</span></button>
         </div>
       </header>
 
       <main id="main" tabindex="-1">
-        <div class="view-switch" role="group" aria-label="Demo view">
-          <button id="show-conversation" type="button" aria-pressed="true" aria-controls="conversation-view">Agent conversation</button>
-          <button id="show-storage" type="button" aria-pressed="false" aria-controls="storage-story storage-evidence">Storage demo</button>
-        </div>
-
-        <section id="conversation-view" class="conversation-view" aria-labelledby="conversation-title">
-          <div class="conversation-heading">
-            <div><h1 id="conversation-title">Four agents. One conversation.</h1><p>They build on each other’s replies, then recover the conversation after a real restart.</p></div>
-            <div class="model-badge"><code id="conversation-model">qwen3.5:0.8b</code><span>One small local model</span></div>
-          </div>
+        <section class="mission" aria-label="Conversation mission">
           <form id="conversation-form" class="conversation-form" novalidate>
             <div class="field">
-              <label for="conversation-topic">What should the team work on?</label>
-              <textarea id="conversation-topic" name="topic" rows="2" minlength="1" maxlength="400" required aria-describedby="conversation-topic-help conversation-topic-error">Plan a free outdoor neighborhood book swap this Saturday. We have one table, two volunteers, and a chance of rain. Agree on the exchange rules, who does what, and a rain backup.</textarea>
-              <p id="conversation-topic-help" class="section-help">1-400 characters. Two rounds, eight replies, generated one at a time.</p>
+              <label for="conversation-topic">The mission <span>Give the team a problem</span></label>
+              <textarea id="conversation-topic" name="topic" rows="2" required aria-describedby="conversation-topic-help conversation-topic-error">Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.</textarea>
+              <p id="conversation-topic-help" class="section-help">Eight short replies. A broken oven. A real process crash.</p>
               <p id="conversation-topic-error" class="field-error" role="alert" hidden></p>
             </div>
             <div class="conversation-transport">
@@ -49,18 +41,23 @@
               <p id="conversation-control-note" class="section-help">Connecting to the local controller.</p>
             </div>
           </form>
-
+        </section>
+        <div id="live-stage" class="live-stage" data-focus="">
+          <section class="runtime-panel" aria-labelledby="runtime-title">
+            <div class="pane-heading"><h2 id="runtime-title"><span>asmRT</span> <span id="runtime-subtitle">Agents &amp; execution</span></h2><span id="conversation-runtime" class="process-status" data-tone="neutral">Not started</span></div>
+            <section id="conversation-view" class="conversation-view" aria-label="Four-agent conversation">
           <ol id="agent-roster" class="agent-roster" aria-label="Four agent roles sharing one local model" data-runtime="idle">
-            <li class="agent-card" data-agent-id="planner" data-worker-slot="0" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Planner robot portrait"></div><div class="agent-info"><h2 class="agent-name">Planner</h2><p class="agent-role">Proposes the plan</p><p class="agent-status">Ready</p></div></li>
-            <li class="agent-card" data-agent-id="builder" data-worker-slot="1" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Builder robot portrait"></div><div class="agent-info"><h2 class="agent-name">Builder</h2><p class="agent-role">Makes it practical</p><p class="agent-status">Ready</p></div></li>
-            <li class="agent-card" data-agent-id="critic" data-worker-slot="2" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Critic robot portrait"></div><div class="agent-info"><h2 class="agent-name">Critic</h2><p class="agent-role">Challenges assumptions</p><p class="agent-status">Ready</p></div></li>
-            <li class="agent-card" data-agent-id="editor" data-worker-slot="3" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Editor robot portrait"></div><div class="agent-info"><h2 class="agent-name">Editor</h2><p class="agent-role">Brings it together</p><p class="agent-status">Ready</p></div></li>
+            <li class="agent-card" data-agent-id="planner" data-worker-slot="0" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Planner robot portrait"></div><div class="agent-info"><h3 class="agent-name">Planner</h3><p class="agent-role">Proposes the plan</p><p class="agent-status">Ready</p></div></li>
+            <li class="agent-card" data-agent-id="builder" data-worker-slot="1" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Builder robot portrait"></div><div class="agent-info"><h3 class="agent-name">Builder</h3><p class="agent-role">Makes it practical</p><p class="agent-status">Ready</p></div></li>
+            <li class="agent-card" data-agent-id="critic" data-worker-slot="2" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Critic robot portrait"></div><div class="agent-info"><h3 class="agent-name">Critic</h3><p class="agent-role">Challenges assumptions</p><p class="agent-status">Ready</p></div></li>
+            <li class="agent-card" data-agent-id="editor" data-worker-slot="3" data-state="ready"><div class="worker-portrait agent-portrait" role="img" aria-label="Editor robot portrait"></div><div class="agent-info"><h3 class="agent-name">Editor</h3><p class="agent-role">Brings it together</p><p class="agent-status">Ready</p></div></li>
           </ol>
 
+          <div class="conversation-route"><ol id="conversation-rail" aria-label="Automatic recovery sequence"><li data-chat-chapter="0">Talk</li><li data-chat-chapter="1">Crash</li><li data-chat-chapter="2">Recover</li><li data-chat-chapter="3">Verify</li></ol><span id="conversation-clock" role="timer" aria-live="off">Automatic</span></div>
           <section class="conversation-thread" aria-labelledby="conversation-scene-title">
             <div class="conversation-thread-heading">
-              <div><span id="conversation-turn" class="conversation-turn">8 turns, 2 rounds</span><h2 id="conversation-scene-title">Ready when you are</h2><p id="conversation-scene-description">One shared model takes four different roles. Each reply becomes input for the next.</p></div>
-              <span id="conversation-runtime" class="process-status" data-tone="neutral">Not started</span>
+              <div><h3 id="conversation-scene-title">Can they save pizza night?</h3><p id="conversation-scene-description">Four roles, one local model. Every reply becomes the next agent’s context.</p></div>
+              <span id="conversation-turn" class="conversation-turn">0 / 8</span>
             </div>
             <div id="conversation-scroll" class="conversation-scroll" tabindex="0" role="log" aria-label="Generated conversation, oldest reply first" aria-live="polite" aria-relevant="additions">
               <div id="conversation-empty" class="conversation-empty"><h3>No scripted dialogue.</h3><p>Start the conversation to see the actual replies. No words are shown before a reply file is published.</p></div>
@@ -71,20 +68,12 @@
           </section>
           <div id="conversation-recovery" class="conversation-recovery" hidden><strong>Continuing from saved context</strong><p id="conversation-recovery-note"></p></div>
           <div id="conversation-verification" class="verification-result" hidden><strong>Replay verified</strong><code>completed_now = 0</code><code>model_calls_now = 0</code><span id="conversation-reused"></span></div>
-          <details id="saved-conversation-work" class="saved-work">
-            <summary>Saved topic, jobs &amp; inputs <span id="conversation-save-summary">Not observed yet</span></summary>
-            <p class="section-help">The executable job includes the role prompt, topic, model identity and prior reply IDs. Status alone is not the work.</p>
-            <dl class="saved-work-metadata"><div><dt>Saved topic</dt><dd id="conversation-saved-topic">Not read yet</dd></div><div><dt>Conversation definition</dt><dd><code id="conversation-definition-file">Not read yet</code></dd></div><div><dt>Definition SHA-256</dt><dd><code id="conversation-definition-hash">Not read yet</code></dd></div><div><dt>Model digest</dt><dd><code id="conversation-model-digest">Not read yet</code></dd></div></dl>
-            <ul id="conversation-jobs" class="conversation-jobs" aria-label="Inspect persisted turn definitions"></ul>
-            <p id="conversation-jobs-empty" class="section-help">Job buttons appear only when a definition reference has been observed in a task record.</p>
-            <p class="inference-note">A saved reply can be reused. A reply lost before it is saved may be generated again; this is not an exactly-once inference guarantee.</p>
-          </details>
         </section>
 
         <section id="storage-story" class="story" aria-labelledby="scene-title" hidden>
           <div class="story-heading">
             <div id="scene-copy" aria-live="polite" aria-atomic="true">
-              <h1 id="scene-title">Workers stop. Work survives.</h1>
+              <h3 id="scene-title">Workers stop. Work survives.</h3>
               <p id="scene-description">8 files. 4 Rust workers. One crash. Watch what survives.</p>
             </div>
             <div class="transport">
@@ -103,27 +92,6 @@
             <li data-chapter="4"><span>Finish</span></li>
             <li data-chapter="5"><span>Verify</span></li>
           </ol>
-        </section>
-        <p id="action-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
-
-        <noscript><p class="notice notice-error">JavaScript is required to read the local controller. Nothing starts without your action.</p></noscript>
-        <div id="incompatible-run" class="notice notice-warning" hidden>
-          <div><strong id="incompatible-title">A separate run is active.</strong><p id="incompatible-description">Stop it before playing the timed story. Its database and files will be kept.</p></div>
-          <button id="stop-current-run" class="button button-interrupt" type="button" disabled>Stop current run</button>
-        </div>
-        <div id="connection-error" class="notice notice-error" role="alert" hidden>
-          <div><strong id="connection-error-title">Controller unavailable</strong><p id="connection-error-message"></p></div>
-          <button id="retry-connection" class="button button-small" type="button">Retry connection</button>
-        </div>
-        <div id="action-error" class="notice notice-error" role="alert" hidden>
-          <div><strong>Command not confirmed</strong><p id="action-error-message"></p></div>
-          <button id="dismiss-action-error" class="button button-small" type="button">Dismiss</button>
-        </div>
-        <div id="server-error" class="notice notice-error" role="alert" hidden><div><strong>The runtime reported an error.</strong><p id="server-error-message"></p></div></div>
-
-        <details id="storage-evidence" class="storage-evidence" hidden>
-          <summary id="storage-evidence-summary">Native records &amp; reply files <span>Actual asmDB reads and external JSON</span></summary>
-        <div id="live-stage" class="live-stage" data-focus="">
           <section id="workers-stage" class="workers-stage" aria-labelledby="workers-title" data-runtime="idle">
             <div class="panel-heading"><h2 id="workers-title">Four Rust workers</h2><span id="process-info" class="process-status" data-tone="neutral">Not started</span></div>
             <ol id="worker-lanes" class="worker-lanes" aria-label="The four real worker identities">
@@ -151,36 +119,63 @@
               <div id="bridge-node" class="path-node"><h3>MCP</h3><span>1 stdio connection</span></div>
               <span class="path-arrow database-arrow" aria-hidden="true">→</span>
             </div>
-            <p class="workers-note">Deterministic Rust workers, not LLM agents. The robots are illustrations.</p>
+            <p class="workers-note">Deterministic Rust workers, not LLM agents.</p>
+          </section>
+        </section>
           </section>
 
           <section id="database-panel" class="database-panel" aria-labelledby="database-title">
-            <div class="database-heading"><h2 id="database-title">asmDB <span>records</span></h2><span id="database-read-count" class="technical-tag">No read yet</span></div>
-            <p id="database-status" class="database-status">Waiting for the first real database read.</p>
-            <div class="query-strip"><code id="database-commands">Awaiting db_list</code><span class="query-tool">MCP / db_list</span></div>
+            <div class="database-heading"><h2 id="database-title">asmDB <span>Durable records</span></h2><span id="database-read-count" class="technical-tag">No read yet</span></div>
+            <p id="database-status" class="database-status">Waiting for the first database read.</p>
+            <div class="query-strip"><code id="database-commands">Awaiting db_list</code><label class="check-field raw-toggle"><input id="raw-records" type="checkbox"> Raw fields</label></div>
             <div id="database-scroll" class="database-scroll" tabindex="0" role="region" aria-labelledby="database-title" aria-describedby="database-scroll-hint">
               <p id="database-scroll-hint" class="sr-only">Scrollable records table. On narrow screens, use the arrow keys to scroll horizontally.</p>
               <table class="records-table">
-                <caption class="sr-only">Actual db_list response, decoded by the bridge. Not simulated shell output.</caption>
-                <thead><tr><th scope="col">ID</th><th scope="col">VALUE <span>attempt</span></th><th scope="col">TAG <span>state</span></th><th scope="col">CONTENT</th></tr></thead>
+                <caption class="sr-only">Actual db_list rows in native order, with readable labels and abbreviated hashes. Enable Raw fields for exact bridge-decoded values.</caption>
+                <thead><tr><th scope="col">Task <span>ID</span></th><th scope="col">Attempt <span>VALUE</span></th><th scope="col">State <span>TAG</span></th><th scope="col">Saved references <span>CONTENT · select to inspect</span></th></tr></thead>
                 <tbody id="database-rows"></tbody>
               </table>
-              <div id="database-empty" class="database-empty"><strong>No records read yet.</strong><p>Play opens an isolated asmDB and starts the real runtime.</p></div>
+              <div id="database-empty" class="database-empty"><strong>No records read yet.</strong><p>Start a conversation to see the real asmDB records.</p></div>
             </div>
-            <div class="database-footer"><p id="database-provenance">SELECT * via MCP · same writer</p><span id="database-observed-at">Not observed</span><p class="record-key">CONTENT: <code>o</code> = owner, <code>r</code> = artifact; typed jobs add <code>d</code> = definition reference, <code>h</code> = hash. Values are bridge-decoded TSV.</p></div>
+            <div class="database-footer"><p id="database-provenance">SELECT * via MCP · same writer</p><span id="database-observed-at">Not observed</span><p class="record-key">256-byte records hold state and references. Full instructions and replies live in JSON.</p></div>
           </section>
         </div>
 
-        <section id="files-panel" class="files-panel" aria-labelledby="files-title">
+        <section id="journal" class="journal" aria-labelledby="journal-title">
+          <div class="journal-heading"><h2 id="journal-title">Live events</h2><span id="journal-count" class="technical-tag">0 events</span><span class="journal-source">Runtime + controller, not CDC</span><label class="check-field"><input id="all-events" type="checkbox"> Include reads</label></div>
+          <ol id="event-list" class="event-list" tabindex="0" aria-label="Latest runtime and controller events, newest first"></ol>
+          <p id="journal-empty" class="section-help">Start the conversation to see real events.</p>
+        </section>
+        <div class="notices">
+          <noscript><p class="notice notice-error">JavaScript is required. Nothing starts without your action.</p></noscript>
+          <div id="connection-error" class="notice notice-error" role="alert" hidden><div><strong id="connection-error-title">Controller unavailable</strong><p id="connection-error-message"></p></div><button id="retry-connection" class="button button-small" type="button">Retry connection</button></div>
+          <div id="action-error" class="notice notice-error" role="alert" hidden><div><strong>Command not confirmed</strong><p id="action-error-message"></p></div><button id="dismiss-action-error" class="button button-small" type="button">Dismiss</button></div>
+          <div id="server-error" class="notice notice-error" role="alert" hidden><div><strong>Runtime error</strong><p id="server-error-message"></p></div></div>
+        </div>
+        <p id="action-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+      </main>
+      <footer class="page-footer"><span><code id="conversation-model">qwen3.5:0.8b</code> · one local model, four roles</span><span>No cloud key. Previous runs are kept.</span></footer>
+    </div>
+
+    <dialog id="controls-dialog" class="artifact-dialog controls-dialog" aria-labelledby="controls-dialog-title">
+      <div class="dialog-heading"><div><h2 id="controls-dialog-title">Controls &amp; saved files</h2><p>Real jobs and replies. Each run keeps its own folder.</p></div><button id="close-controls" class="button button-small" type="button" autofocus>Close</button></div>
+      <section id="files-panel" class="files-panel" aria-labelledby="files-title">
           <div class="files-heading"><div><h2 id="files-title">Files on disk</h2><p id="files-note">Real JSON, outside asmDB. Select a published file to inspect it.</p></div><span id="published-count" class="file-count">0 / 8 observed</span></div>
           <ul id="file-list" class="file-list" aria-label="Observed JSON files"></ul>
           <p id="files-empty" class="files-empty">Nothing published yet. Files appear here only after an observation.</p>
           <div id="verification-result" class="verification-result" hidden><strong>Replay verified</strong><code id="verified-count">completed_now = 0</code><span id="verified-note">No new completions after a real restart.</span></div>
         </section>
+        <details id="saved-conversation-work" class="saved-work">
+          <summary>Saved mission &amp; jobs <span id="conversation-save-summary">Not observed yet</span></summary>
+          <p class="section-help">Each job saves the role, instructions, model and prior reply IDs. Status alone cannot resume work.</p>
+          <dl class="saved-work-metadata"><div><dt>Saved topic</dt><dd id="conversation-saved-topic">Not read yet</dd></div><div><dt>Conversation definition</dt><dd><code id="conversation-definition-file">Not read yet</code></dd></div><div><dt>Definition SHA-256</dt><dd><code id="conversation-definition-hash">Not read yet</code></dd></div><div><dt>Model digest</dt><dd><code id="conversation-model-digest">Not read yet</code></dd></div></dl>
+          <ul id="conversation-jobs" class="conversation-jobs" aria-label="Inspect persisted turn definitions"></ul>
+          <p id="conversation-jobs-empty" class="section-help">Jobs appear after their references are read from asmDB.</p>
+          <p class="inference-note">A saved reply can be reused. Inference lost before saving may run again.</p>
         </details>
-
-        <details id="technical-details" class="technical-details">
-          <summary>Technical controls <span>Independent runs, decoded tasks and event journal</span></summary>
+        <details id="technical-details" class="technical-details" open>
+          <summary>Runtime controls <span>Stop, reopen or run the storage-only demo</span></summary>
+          <div class="advanced-actions"><button id="start-storage-story" class="button" type="button" disabled>Storage-only demo</button><span class="section-help">Four deterministic workers. No LLM required.</span></div>
           <section class="technical-section" aria-labelledby="controls-title">
             <h2 id="controls-title">Independent run</h2>
             <form id="run-form" class="run-form" novalidate>
@@ -208,13 +203,6 @@
             </div>
           </section>
 
-          <section class="technical-section" aria-labelledby="journal-title">
-            <div class="panel-heading"><h2 id="journal-title">Event journal</h2><span id="journal-count" class="technical-tag">0 events</span></div>
-            <ol id="event-list" class="event-list" aria-label="Latest runtime and controller events, newest first"></ol>
-            <p id="journal-empty" class="section-help">Actual events appear after a run starts.</p>
-            <p class="journal-note">Controller-local sequence, not a durable CDC feed or a performance benchmark.</p>
-          </section>
-
           <details class="source-panel">
             <summary>Source and storage paths</summary>
             <div class="source-content">
@@ -224,9 +212,7 @@
             </div>
           </details>
         </details>
-      </main>
-      <footer class="page-footer"><span>asmRT coordinates. asmDB remembers.</span><span>Real local execution. Previous run folders are kept.</span></footer>
-    </div>
+    </dialog>
 
     <dialog id="artifact-dialog" class="artifact-dialog" aria-labelledby="artifact-title" aria-describedby="artifact-description">
       <div class="dialog-heading"><div><h2 id="artifact-title">Task inspector</h2><p id="artifact-description">Saved executable job, decoded task record and real external JSON.</p></div><button id="close-artifact" class="button button-small" type="button" autofocus>Close</button></div>

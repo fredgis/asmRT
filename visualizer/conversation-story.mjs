@@ -1,4 +1,4 @@
-export const DEFAULT_TOPIC = 'Plan a free outdoor neighborhood book swap this Saturday. We have one table, two volunteers, and a chance of rain. Agree on the exchange rules, who does what, and a rain backup.';
+export const DEFAULT_TOPIC = 'Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.';
 
 export function conversationOptions(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options)
@@ -27,44 +27,45 @@ export function localModelSettings(model, endpoint) {
 export function describeConversation({ phase, checkpoint, tasks, summary, conversation, run }) {
   const completed = tasks.filter(task => task.state === 'completed').length;
   const total = run.tasks * 3 + 5;
+  const pizza = conversation?.topic === DEFAULT_TOPIC;
   const scene = (id, title, description, next_label, action, duration_ms, index, focus = 'conversation') => ({
     scene: { id: `chat-${id}`, chapter: 'Conversation', title, description, next_label, focus },
     action, duration_ms, index, total,
   });
   if (phase === 'finished') {
     if (summary?.completed_now === 0 && summary?.model_calls_now === 0) {
-      return scene('verified', 'Same conversation. Zero new model calls.',
-        `Rust reopened all ${completed} replies, checked their definitions, input chains and SHA-256 commitments, and did not ask the model again.`,
+      return scene('verified', 'Same replies. Zero new model calls.',
+        `${completed} replies reopened and verified. Nothing was generated again.`,
         'Start another conversation', null, 0, total - 1);
     }
-    return scene('completed', 'The group has finished its conversation.',
-      `All ${completed} replies are saved and committed in asmDB. One final restart will verify that no completed turn calls the model again.`,
-      'Restart and verify the saved conversation', 'resume', 4500, total - 2);
+    return scene('completed', 'Conversation saved. One last check.',
+      `${completed} replies committed. Restarting to prove they are reused.`,
+      'Restart and verify', 'resume', 4500, total - 2);
   }
   if (phase === 'interrupted') {
-    if (!conversation) return scene('reopen', 'A saved conversation is available.',
-      'No messages have been read in this controller session yet. Reopen the saved definition and asmDB before claiming what was completed.',
-      'Read the saved conversation', 'resume', 2500, 0, 'database');
-    return scene('crashed', 'Rust stopped. The conversation did not disappear.',
-      `${completed} committed message${completed === 1 ? '' : 's'} remain visible as last-read evidence. The next process will reread the job definitions, messages and asmDB records.`,
-      'Reopen the saved conversation', 'resume', 6500, completed * 3 + 1, 'database');
+    if (!conversation) return scene('reopen', 'Reopen the saved conversation.',
+      'Read the jobs and replies from disk before continuing.',
+      'Read saved work', 'resume', 2500, 0, 'database');
+    return scene('crashed', 'Rust is gone. The work is here.',
+      `${completed} committed replies remain visible. A new process will verify them from disk.`,
+      'Reopen the same conversation', 'resume', 7000, completed * 3 + 1, 'database');
   }
   if (phase === 'running' && conversation?.active?.stage === 'generating') {
     const active = conversation.active;
     const agent = conversation.agents.find(agent => agent.id === active.agent_id);
-    return scene('generating', `${agent?.name ?? 'The agent'} is replying to the group.`,
-      `A real local model request is running with ${active.input_ids.length} previous saved message${active.input_ids.length === 1 ? '' : 's'}. No words are scripted or animated ahead of the reply.`,
-      'Waiting for the local model', null, 0, (Number(active.task_id) - 1) * 3 + 1);
+    return scene('generating', `${agent?.name ?? 'The agent'} is replying.`,
+      `${active.input_ids.length} saved replies in context. Waiting for the real local model.`,
+      'Waiting for Ollama', null, 0, (Number(active.task_id) - 1) * 3 + 1);
   }
   if (phase !== 'paused' || !checkpoint) return null;
   if (checkpoint.stage === 'ready') {
     const recovering = tasks.some(task => Number(task.attempt) > 0);
     return recovering
-      ? scene('recovered', 'The new process has recovered the conversation.',
-        `${completed} replies were verified from disk. The remaining turns retain their saved agent instructions, model identity and input references; they do not start a new discussion.`,
-        'Continue from the saved messages', 'next', 4500, completed * 3, 'database')
-      : scene('ready', 'Four agents. One small local model.',
-        `${run.tasks} versioned turn definitions are now saved. Each agent will receive what the previous agents actually said. The database stores the definition hashes, not just status flags.`,
+      ? scene('recovered', 'New process. Same conversation.',
+        `${completed} replies verified. Saved instructions tell the next agent what to do.`,
+        'Continue the conversation', 'next', 5000, completed * 3, 'database')
+      : scene('ready', pizza ? 'Can they save pizza night?' : 'The team has a mission.',
+        `${run.tasks} jobs saved. Every agent will read the previous replies.`,
         'Give Planner the floor', 'next', 4500, 0);
   }
   const task = tasks.find(task => task.id === checkpoint.task_ids[0]);
@@ -74,23 +75,23 @@ export function describeConversation({ phase, checkpoint, tasks, summary, conver
   const name = agent?.name ?? 'The agent';
   if (checkpoint.stage === 'claimed') {
     if (number === Math.floor(run.tasks / 2) + 1 && task.attempt === '1') {
-      return scene('crash-next', 'An interruption, in the middle of the discussion.',
-        `${completed} replies are already committed. ${name}'s next turn is assigned, but its model call has not started. We will stop Rust and resume from the saved conversation.`,
-        'Stop the actual Rust process', 'interrupt', 4500, (number - 1) * 3 + 1, 'database');
+      return scene('crash-next', pizza && number === 5 ? 'The oven broke. Now Rust stops.' : 'Time for a real crash.',
+        `${completed} replies committed. Turn ${number} assigned, but its model call has not started.`,
+        'Stop the Rust process', 'interrupt', 5000, (number - 1) * 3 + 1, 'database');
     }
-    return scene('assigned', `Turn ${number} of ${run.tasks}: ${name} has the floor.`,
-      `${name} will read ${completed} preceding saved messages and its own persisted instructions. ${Number(task.attempt) > 1 ? 'This interrupted assignment is being retried.' : 'The other agents are listening.'}`,
-      'Ask the local model', 'next', 1000, (number - 1) * 3 + 1);
+    return scene('assigned', `${name}, your turn.`,
+      `${completed} saved replies to read. ${Number(task.attempt) > 1 ? 'Retrying the same job, not the whole discussion.' : 'The others are listening.'}`,
+      'Ask the local model', 'next', 1100, (number - 1) * 3 + 1);
   }
   if (checkpoint.stage === 'published') {
     const message = conversation?.messages.find(message => message.task_id === task.id);
     const words = message?.text.trim().split(/\s+/).length ?? 0;
-    return scene('saved', `${name}'s reply is saved on disk.`,
-      `${message?.reused ? 'This existing reply was reused without a model call.' : 'These are the model’s actual words.'} Its asmDB completion is not committed yet. Read the reply before the conversation moves on.`,
-      'Commit this reply in asmDB', 'next', Math.max(6000, Math.min(18000, words * 300)), (number - 1) * 3 + 2);
+    return scene('saved', `${name}'s reply is saved.`,
+      message?.reused ? 'Existing reply reused. No model call.' : 'Real words, on disk. Next: commit their hash in asmDB.',
+      'Commit the reply', 'next', Math.max(6500, Math.min(18000, words * 300)), (number - 1) * 3 + 2);
   }
-  if (checkpoint.stage === 'completed') return scene('committed', `${name}'s reply is now committed.`,
-    `asmDB records the reply's SHA-256 as well as its task definition. The next agent can now use this message as a durable input.`,
-    'Pass the conversation to the next agent', 'next', 900, number * 3, 'database');
+  if (checkpoint.stage === 'completed') return scene('committed', `${name}'s reply is committed.`,
+    'asmDB has its hash. The next agent can use this reply.',
+    'Pass to the next agent', 'next', 1100, number * 3, 'database');
   return null;
 }

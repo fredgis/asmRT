@@ -1,0 +1,37 @@
+flowchart TB
+    subgraph VIEW["Local observation and control"]
+        UI["Browser console<br>asmRT beside asmDB · event dock"]
+        CTRL["Node controller · 127.0.0.1:8787<br>owns Rust child and story timers"]
+        UI <-->|"HTTP commands + state polling"| CTRL
+    end
+    subgraph RUST["One Rust process"]
+        H["Known handlers<br>sequential chat turns or concurrent demo workers"]
+        A["State Actor<br>64-request mailbox · acknowledged task index"]
+        C["Native task codec<br>state · attempt · owner · references"]
+        M["MCP client<br>one request at a time"]
+        H -->|"enqueue / claim / complete"| A
+        A --- C
+        A --> M
+    end
+    CTRL <-->|"stdin checkpoints / stdout events"| H
+    M <-->|"one MCP / stdio connection"| BRIDGE["Existing asmDB Node bridge<br>sibling checkout"]
+    BRIDGE <-->|"native commands · one child"| DB[("asmDB writer<br>engine and format unchanged")]
+    DB --> NATIVE[("asmrt.dat + .wal + .cdc")]
+    H <-->|"local HTTP inference"| LLM["Ollama<br>one installed model · four logical roles"]
+    H -->|"publish before native completion"| FILES[("Run files<br>manifest · definitions · replies")]
+    CTRL -.->|"validated file inspection"| FILES
+    classDef control fill:#122b46,stroke:#78b9ff,stroke-width:2px,color:#f3f7fc
+    classDef runtime fill:#082a40,stroke:#20ddf4,stroke-width:2px,color:#f3f7fc
+    classDef existing fill:#172238,stroke:#94acc5,stroke-width:2px,color:#f3f7fc
+    classDef storage fill:#332517,stroke:#ff961f,stroke-width:2px,color:#fff0d7
+    classDef payload fill:#241d3c,stroke:#b69afa,stroke-width:2px,color:#f3f7fc
+    classDef model fill:#12342b,stroke:#5be0aa,stroke-width:2px,color:#e5fff3
+    class UI,CTRL control
+    class H,A,C,M runtime
+    class BRIDGE existing
+    class DB,NATIVE storage
+    class FILES payload
+    class LLM model
+    style VIEW fill:#101d30,stroke:#78b9ff,color:#f3f7fc
+    style RUST fill:#071b2d,stroke:#358399,color:#d5f6ff
+    linkStyle default stroke:#64889f,stroke-width:2px

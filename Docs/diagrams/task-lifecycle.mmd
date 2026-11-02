@@ -1,0 +1,20 @@
+flowchart LR
+    P(["pending<br>attempt retained · no owner or result"])
+    R(["running<br>owner + incremented attempt"])
+    D(["completed<br>same claim + result reference"])
+    X["Rejected completion<br>durable task unchanged"]
+    P -->|"claim: persist attempt + 1"| R
+    R -->|"result published first<br>matching owner, attempt, definition"| D
+    R -->|"coordinator reopen<br>clear owner and result; keep attempt"| P
+    R -.->|"stale or conflicting claim"| X
+    D -.->|"different result or stale claim"| X
+    D -->|"identical completion: no new write"| D
+    classDef pending fill:#082a40,stroke:#20ddf4,stroke-width:2px,color:#f3f7fc
+    classDef running fill:#332517,stroke:#ff961f,stroke-width:2px,color:#fff0d7
+    classDef completed fill:#12342b,stroke:#5be0aa,stroke-width:2px,color:#e5fff3
+    classDef rejected fill:#3b1e2c,stroke:#fb8daa,stroke-dasharray:5 4,color:#ffe6ee
+    class P pending
+    class R running
+    class D completed
+    class X rejected
+    linkStyle default stroke:#64889f,stroke-width:2px

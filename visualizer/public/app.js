@@ -1,8 +1,10 @@
+import { nativeRecordFields, conversationChapter } from "/console-view.mjs";
+
 const byId = (id) => document.getElementById(id);
 const ui = {
   conversation: byId("conversation-view"), storageStory: byId("storage-story"),
-  showConversation: byId("show-conversation"), showStorage: byId("show-storage"),
-  evidence: byId("storage-evidence"), evidenceSummary: byId("storage-evidence-summary"),
+  controls: byId("controls-dialog"), openControls: byId("open-controls"), closeControls: byId("close-controls"),
+  storageStart: byId("start-storage-story"), rawRecords: byId("raw-records"), allEvents: byId("all-events"),
   conversationForm: byId("conversation-form"), topic: byId("conversation-topic"), topicHelp: byId("conversation-topic-help"),
   topicError: byId("conversation-topic-error"), conversationStart: byId("start-conversation"),
   conversationButton: byId("conversation-button-label"), conversationIcon: byId("conversation-icon"),
@@ -22,7 +24,6 @@ const ui = {
   sceneTitle: byId("scene-title"), sceneDescription: byId("scene-description"),
   countdown: byId("countdown-value"), countdownLabel: byId("countdown-label"), hint: byId("playback-hint"),
   connectionStatus: byId("connection-status"), actionStatus: byId("action-status"),
-  incompatible: byId("incompatible-run"), stopCurrent: byId("stop-current-run"),
   connectionError: byId("connection-error"), connectionErrorTitle: byId("connection-error-title"),
   connectionErrorMessage: byId("connection-error-message"), retryConnection: byId("retry-connection"),
   actionError: byId("action-error"), actionErrorMessage: byId("action-error-message"),
@@ -68,7 +69,9 @@ const eventLabels = {
   artifact_published: "File published", task_completed: "Completion committed", checkpoint: "Checkpoint reached",
   interrupted: "Process stopped", finished: "Runtime finished", error: "Error reported",
   database: "Database read", database_read: "Database read", playback_paused: "Playback paused", playback_resumed: "Playback resumed",
+  inference_started: "Model call started", message_published: "Reply saved",
 };
+const readEvents = new Set(["database", "database_read", "checkpoint"]);
 const collator = new Intl.Collator("en", { numeric: true });
 const clock = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const recordNodes = new Map();
@@ -105,8 +108,8 @@ let artifactRequest = null;
 let artifactView = null;
 let definitionRequest = null;
 let definitionView = null;
-let viewMode = "conversation";
-let conversationEvidenceOpen = false;
+const chatChapters = [...document.querySelectorAll("#conversation-rail > li")];
+const DEFAULT_TOPIC = "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";
 let lastConversation = null;
 
 function text(node, value) {
@@ -211,16 +214,13 @@ function hasLiveConversationProcess() {
   return isConversation() && connected && state.pid != null && ["running", "paused"].includes(state.phase);
 }
 
-function setView(mode) {
-  viewMode = mode;
-  ui.conversation.hidden = mode !== "conversation";
-  ui.storageStory.hidden = mode !== "storage";
-  ui.evidenceSummary.hidden = mode === "storage";
-  ui.evidence.open = mode === "storage" || conversationEvidenceOpen;
-  attribute(ui.showConversation, "aria-pressed", mode === "conversation");
-  attribute(ui.showStorage, "aria-pressed", mode === "storage");
-  attribute(byId("main"), "data-view", mode);
-  render();
+function renderLayout() {
+  const storage = Boolean(state?.run && !isConversation() && !unobservedLegacyRun());
+  ui.conversation.hidden = storage;
+  ui.storageStory.hidden = !storage;
+  ui.workersStage.hidden = !storage;
+  ui.conversationRuntime.hidden = storage;
+  text(byId("runtime-subtitle"), storage ? "Workers & execution" : "Agents & execution");
 }
 
 function currentProcessEvents() {
@@ -232,7 +232,8 @@ function currentProcessEvents() {
 }
 
 function focusPrimary() {
-  const primary = viewMode === "conversation" ? ui.conversationStart : ui.play;
+  if (ui.controls.open) { ui.closeControls.focus({ preventScroll: true }); return; }
+  const primary = !ui.storageStory.hidden && workInFlight() ? ui.play : ui.conversationStart;
   (primary.disabled ? byId("main") : primary).focus({ preventScroll: true });
 }
 
@@ -477,7 +478,7 @@ async function performAction(kind, options = {}) {
 function renderControls() {
   const busy = activeAction !== null;
   ui.play.disabled = busy || !actionAllowed(primaryAction());
-  ui.stopCurrent.disabled = busy || !actionAllowed("interrupt");
+  ui.storageStart.disabled = busy || !actionAllowed("storage");
   ui.start.disabled = busy || !actionAllowed("run");
   ui.interrupt.disabled = busy || !actionAllowed("interrupt");
   ui.resume.disabled = busy || !actionAllowed("resume");
@@ -488,7 +489,7 @@ function renderControls() {
   text(ui.retryConnection, pollInFlight ? "Reading controller..." : "Retry connection");
   text(ui.start, activeAction === "run" ? "Starting..." : "New run");
   text(ui.interrupt, activeAction === "interrupt" ? "Stopping..." : "Stop runtime");
-  text(ui.stopCurrent, activeAction === "interrupt" ? "Stopping..." : "Stop current run");
+  text(ui.storageStart, activeAction === "storage" ? "Starting..." : "Storage-only demo");
   text(ui.resume, activeAction === "resume" ? "Reopening..." : state?.phase === "finished" ? "Check replay" : "Reopen run");
   text(ui.next, activeAction === "next" ? "Continuing..." : "Next checkpoint");
   const messages = { conversation: "Starting a fresh conversation. Rust will execute the saved jobs using the local model.", storage: "Starting a fresh storage story in a separate run folder.", play: "Resuming server-timed playback.", pause: "Requesting a pause. The current operation may finish at its safe checkpoint.", run: "Starting an independent Rust run.", interrupt: "Stopping this run's real runtime. Its files and database are kept.", resume: "Reopening the existing run and reading its durable state.", next: "Advancing only the checkpoint selected by your click." };
@@ -516,20 +517,19 @@ function renderConversationControls() {
           : isConversation() && activePhases.has(state.phase) ? "Conversation active" : "Start conversation");
   text(ui.conversationIcon, kind === "pause" ? "Ⅱ" : "▶");
   ui.topic.readOnly = kind !== "conversation" || busy || (isConversation() && activePhases.has(state.phase));
-  text(ui.topicHelp, ui.topic.readOnly ? "This topic is saved with the jobs. Continuing uses it unchanged."
-    : "1-400 characters. Two rounds, eight replies, generated one at a time.");
-  let note = "One click starts the sequence. Reply times depend on your hardware.";
-  if (!connected) note = state ? "Controller offline. Reconnect before sending a command." : "Connecting to the local controller.";
-  else if (busy) note = activeAction === "pause" ? "Pausing at a real safe checkpoint. The current operation may finish first." : "Waiting for the controller. No duplicate command is sent.";
-  else if (!isConversation() && workInFlight()) note = actionAllowed("interrupt")
-    ? "A storage runtime is active. Follow it in Storage demo, or explicitly stop it in Technical controls."
-    : "The storage sequence is still in flight. Follow it in Storage demo; pause its playback or wait for the current operation to finish.";
-  else if (!isConversation() && state.run) note = "The saved storage run is not active. Starting a conversation uses a new folder and keeps the previous run.";
-  else if (kind === "pause") note = "The sequence advances automatically. Pause whenever you want more reading time.";
-  else if (kind === "play") note = state.playback.transitioning ? "Finishing the current operation before Resume is available." : "Paused at a safe point. Resume continues this saved conversation.";
-  else if (kind === "resume") note = "Reopen the saved jobs and transcript. An unsaved reply may need to be generated again.";
-  else if (isConversation() && activePhases.has(state.phase)) note = "The runtime is active. Wait for its next observation; no new conversation can replace it.";
-  else if (isConversation() && state.phase === "finished") note = "Start fresh with this topic or edit it. This conversation’s files are kept.";
+  const pizza = ui.topic.value.trim() === DEFAULT_TOPIC;
+  text(ui.topicHelp, ui.topic.readOnly ? "Saved mission. Resume keeps the same instructions and history."
+    : pizza ? "Eight short replies. A broken oven. A real process crash." : "1-400 characters. Eight replies, with a real crash halfway through.");
+  let note = "One click. The rest is automatic.";
+  if (!connected) note = state ? "Controller offline. Reconnecting..." : "Connecting to the local controller.";
+  else if (busy) note = activeAction === "pause" ? "Pausing. The current model call may finish first." : "Waiting for the controller.";
+  else if (!isConversation() && workInFlight()) note = "Storage run active. Follow it below.";
+  else if (!isConversation() && state.run) note = "Starts fresh. Previous run files are kept.";
+  else if (kind === "pause") note = "Automatic playback. Pause for more reading time.";
+  else if (kind === "play") note = state.playback.transitioning ? "Finishing the current operation." : "Paused. Resume continues this conversation.";
+  else if (kind === "resume") note = "Reopen the saved jobs and replies.";
+  else if (isConversation() && activePhases.has(state.phase)) note = "Runtime active. Waiting for its next checkpoint.";
+  else if (isConversation() && state.phase === "finished") note = "Try another mission. This run is kept.";
   text(ui.conversationControl, note);
 }
 
@@ -641,8 +641,7 @@ function renderConversation() {
   const activeAgent = snapshot?.agents.find((agent) => agent.id === active?.agent_id);
   const activeTask = state?.tasks.find((task) => task.id === active?.task_id);
   const hasRetry = activeTask && wasRetried(activeTask.attempt);
-  ui.evidence.hidden = viewMode === "conversation" && !current;
-  ui.workersStage.hidden = viewMode === "conversation" || current;
+  const scene = playback?.scene;
   if (current) {
     attribute(ui.stage, "data-focus", playback?.scene.focus ?? "");
     attribute(ui.stage, "data-scene", playback?.scene.id ?? "idle");
@@ -669,42 +668,52 @@ function renderConversation() {
     text(agent.status, status);
     attribute(agent.root, "data-state", key);
   }
-  text(ui.conversationTitle, playback?.scene.title ?? (stopped ? "The conversation is stopped" : current ? "Opening the saved conversation" : "Ready when you are"));
-  text(ui.conversationDescription, playback?.scene.description ?? (current ? "The controller reports saved jobs and actual replies as the runtime observes them." : "One shared model takes four different roles. Each reply becomes input for the next."));
-  text(ui.conversationTurn, current ? `Turn ${active?.task_id ?? messages.length} / ${total}` : "8 turns, 2 rounds");
+  const pizza = (snapshot?.topic ?? ui.topic.value.trim()) === DEFAULT_TOPIC;
+  text(ui.conversationTitle, scene?.title ?? (stopped ? "Conversation stopped" : current ? "Opening saved work" : pizza ? "Can they save pizza night?" : "The team has a mission."));
+  text(ui.conversationDescription, scene?.description ?? (current ? "Reading saved jobs and replies from this run." : "Four roles, one local model. Each agent reads the previous replies."));
+  text(ui.conversationTurn, `${current ? active?.task_id ?? messages.length : 0} / ${total}`);
   text(ui.conversationRuntime, !current ? "Not started" : !connected ? "Process unconfirmed" : state.phase === "stopping" ? "Stopping Rust" : stopped ? "Rust stopped"
     : state.phase === "starting" ? "Opening runtime" : state.phase === "finished" ? "Rust finished"
-      : playback?.status === "paused" ? "Playback paused" : liveProcess ? `Rust / PID ${state.pid}` : "Awaiting runtime");
+      : liveProcess ? `${playback?.status === "paused" ? "Paused" : "Rust"} / PID ${state.pid}` : "Awaiting runtime");
   attribute(ui.conversationRuntime, "data-tone", stopped && connected ? "danger" : liveProcess ? "rust" : verifiedReplay() && current ? "success" : "neutral");
-  let activity = "Replies are generated locally by Rust through Ollama, not by this browser.";
+  const chapter = conversationChapter(scene?.id, current ? state.tasks : []);
+  for (const item of chatChapters) {
+    const index = Number(item.dataset.chatChapter);
+    if (index === chapter) attribute(item, "aria-current", "step");
+    else item.removeAttribute("aria-current");
+    attribute(item, "data-past", index < chapter);
+  }
+  text(byId("conversation-clock"), !current ? "Automatic" : !connected ? "Offline" : verifiedReplay() ? "Verified"
+    : playback?.status === "paused" ? "Paused" : generating ? "Generating..."
+      : playback?.remaining_ms > 0 ? `Next in ${Math.ceil(playback.remaining_ms / 1000)}s` : stopped ? "Stopped" : state.phase === "finished" ? "Finished" : "Working...");
+  let activity = "Local inference through Ollama. No scripted replies.";
   if (current) {
-    if (!connected) activity = "Controller disconnected. No generating activity can be confirmed.";
-    else if (state.phase === "stopping") activity = "Rust is stopping. The last observed replies remain visible; no new activity is inferred.";
-    else if (stopped) activity = "The agents are stopped. The visible conversation is retained evidence, not live activity.";
-    else if (generating) activity = `${activeAgent?.name ?? active.agent_id} is generating turn ${active.task_id}. Waiting for the actual reply; no partial text is simulated.`;
-    else if (state.phase === "starting" || !state.conversation) activity = "Waiting for a real read of the saved jobs and transcript.";
-    else if (verifiedReplay()) activity = "The verification replay finished without a new completion or model call.";
-    else if (playback?.status === "paused") activity = "Playback paused. Saved replies stay available to read and inspect.";
-    else if (active?.stage === "saved") activity = `Turn ${active.task_id} is saved on disk. The asmDB completion is a separate acknowledgement.`;
-    else if (active?.stage === "assigned") activity = `Turn ${active.task_id} is assigned to ${activeAgent?.name ?? active.agent_id}. Generation has not been observed yet.`;
-    else if (state.phase === "finished") activity = playback?.status === "playing" ? "Replies are saved. The controller is continuing the recovery and verification sequence." : "The conversation has finished. Every visible reply is an observed artifact.";
-    else activity = "Waiting for the next real runtime observation.";
+    if (!connected) activity = "Disconnected. Live activity cannot be confirmed.";
+    else if (state.phase === "stopping") activity = "Stopping Rust. Saved replies stay visible.";
+    else if (stopped) activity = "Process stopped. Showing the last observed replies.";
+    else if (generating) activity = `${activeAgent?.name ?? active.agent_id} is replying to ${active.input_ids.length} saved messages...`;
+    else if (state.phase === "starting" || !state.conversation) activity = "Reading saved instructions and conversation history...";
+    else if (verifiedReplay()) activity = "Reopened and checked. No new model calls.";
+    else if (playback?.status === "paused") activity = "Paused. Take your time; saved replies stay here.";
+    else if (active?.stage === "saved") activity = `Turn ${active.task_id} saved. Next: commit its hash in asmDB.`;
+    else if (active?.stage === "assigned") activity = `Turn ${active.task_id} assigned. Model call not started.`;
+    else if (state.phase === "finished") activity = playback?.status === "playing" ? "All replies saved. Next: restart and verify." : "Conversation finished. All replies are on disk.";
+    else activity = "Waiting for the next runtime event.";
   }
   text(ui.conversationActivity, activity);
   attribute(ui.conversationActivity, "data-generating", generating);
-  text(ui.conversationProvenance, !snapshot ? "No transcript has been observed yet." : retained
-    ? "Last observed transcript. A new read is needed to confirm the saved files after stopping or disconnecting."
-    : "Transcript from real reply files reported by the controller. Disk publication and asmDB completion are shown separately.");
-  const emptyTitle = !current ? "No scripted dialogue." : stopped ? "No reply was observed before the stop." : "Waiting for the first real reply.";
+  text(ui.conversationProvenance, !snapshot ? "Reply files appear here after publication." : retained
+    ? "Last observed files. Awaiting a fresh read." : "Real reply files. Saved ≠ committed.");
+  const emptyTitle = !current ? pizza ? "Dinner needs a plan." : "Give the team a problem." : stopped ? "Stopped before the first reply." : "The team is thinking.";
   text(ui.conversationEmpty.querySelector("h3"), emptyTitle);
-  text(ui.conversationEmpty.querySelector("p"), !current ? "Start the conversation to see the actual replies. No words are shown before a reply file is published."
-    : stopped ? "Saved jobs may already exist. Reopen the conversation to read its durable state." : "Local inference can take a little time. This space is never filled with a prewritten conversation.");
+  text(ui.conversationEmpty.querySelector("p"), !current ? "Press Start conversation. Watch the agents talk while asmDB keeps their work."
+    : stopped ? "Reopen to read the saved jobs." : "Waiting for a complete local-model reply. Nothing is prewritten.");
   ui.recovery.hidden = !current || !(stopped || hasRetry || (state.phase === "starting" && messages.length));
-  text(ui.recoveryNote, stopped ? `${messages.length} saved ${messages.length === 1 ? "reply remains" : "replies remain"} visible as last observed evidence. Reopening reads persisted jobs and prior replies before continuing.`
-    : hasRetry ? `Turn ${active.task_id}, attempt ${activeTask.attempt}, uses its saved job${active.input_ids.length ? ` and replies ${active.input_ids.join(", ")}` : ""}. Earlier conversation text supplies the context; it is not recreated from status labels.`
-      : "Reopening the saved jobs and transcript. Previous replies stay visible while the runtime reads them again.");
+  text(ui.recoveryNote, stopped ? `${messages.length} replies retained on screen. Reopening will verify them from disk.`
+    : hasRetry ? `Turn ${active.task_id}, attempt ${activeTask.attempt}. Same saved job, ${active.input_ids.length} prior replies.`
+      : "Rereading the saved jobs and replies, not starting over.");
   ui.conversationVerified.hidden = !current || !verifiedReplay();
-  text(ui.conversationReused, current && Number.isInteger(state.summary?.reused_replies_now) ? `${state.summary.reused_replies_now} saved replies reused in this replay.` : "");
+  text(ui.conversationReused, current && verifiedReplay() ? `${messages.length} replies checked from disk` : "");
   renderMessages(snapshot);
   renderConversationJobs(snapshot);
 }
@@ -801,14 +810,6 @@ function renderNotices() {
   text(ui.actionErrorMessage, actionError ?? "");
   ui.serverError.hidden = !state?.error;
   text(ui.serverErrorMessage, state?.error ?? "");
-  const blockedByOtherRun = viewMode === "conversation" ? !isConversation() && Boolean(state?.run)
-    && workInFlight() : incompatibleRun();
-  ui.incompatible.hidden = !blockedByOtherRun;
-  text(byId("incompatible-title"), isConversation() ? "A conversation is active." : "A storage run is active.");
-  text(byId("incompatible-description"), viewMode === "conversation" ? "Switch to Storage demo to follow it. Starting a conversation will not silently interrupt existing work."
-    : isConversation() ? "Switch to Agent conversation to follow it. Changing views does not pause or replace a run."
-      : actionAllowed("interrupt") ? "Stop it before playing the timed story. Its database and files will be kept."
-        : "Wait for the current operation before playing the timed story. Its database and files will be kept.");
 }
 
 function renderWorkers(highlight) {
@@ -868,9 +869,16 @@ function newRecordNode(row) {
   id.scope = "row";
   const value = element("td");
   const tag = element("td");
-  const content = element("td");
-  root.append(id, value, tag, content);
-  return { root, value, tag, content, signature: null };
+  const cell = element("td");
+  const inspect = inspectorButton("", row.id);
+  inspect.className = "record-inspect";
+  attribute(inspect, "aria-label", `Inspect record ${row.id}, saved job and reply`);
+  const content = element("span", "record-reference");
+  const hashes = element("span", "record-hashes");
+  inspect.append(content, hashes);
+  cell.append(inspect);
+  root.append(id, value, tag, cell);
+  return { root, value, tag, content, hashes, inspect, signature: null };
 }
 
 function renderDatabase(highlight) {
@@ -880,6 +888,7 @@ function renderDatabase(highlight) {
   const retained = !connected || awaitingRead || ["starting", "stopping", "interrupted", "error"].includes(state?.phase);
   attribute(ui.database, "data-retained", Boolean(db && retained));
   attribute(ui.database, "data-sequence", db?.sequence ?? "");
+  attribute(ui.database, "data-raw", ui.rawRecords.checked);
   const rows = db?.response.rows ?? [];
   const ids = new Set(rows.map((row) => row.id));
   for (const id of recordNodes.keys()) if (!ids.has(id)) recordNodes.delete(id);
@@ -887,10 +896,16 @@ function renderDatabase(highlight) {
     let entry = recordNodes.get(row.id);
     if (!entry) { entry = newRecordNode(row); recordNodes.set(row.id, entry); }
     const signature = JSON.stringify([row.value, row.tag, row.content]);
+    const fields = nativeRecordFields(row, ui.rawRecords.checked);
     text(entry.value, row.value);
-    text(entry.tag, row.tag);
-    text(entry.content, row.content);
-    attribute(entry.root, "data-state", /^asmrt\.v[12]\.(pending|running|completed)$/.test(row.tag) ? row.tag.slice(9) : "");
+    text(entry.tag, fields.tag);
+    entry.tag.title = row.tag;
+    text(entry.content, fields.content);
+    text(entry.hashes, fields.hashes);
+    entry.hashes.hidden = !fields.hashes;
+    entry.inspect.title = row.content;
+    entry.inspect.disabled = !state.tasks.some(task => task.id === row.id) && !observedFiles.has(row.id);
+    attribute(entry.root, "data-state", fields.state);
     attribute(entry.root, "data-retried", wasRetried(row.value));
     if (highlight && signature !== entry.signature) flash(entry.root);
     entry.signature = signature;
@@ -900,17 +915,17 @@ function renderDatabase(highlight) {
   ui.databaseEmpty.hidden = rows.length > 0;
   text(ui.databaseReadCount, db ? `${db.response.count} rows` : "No read yet");
   text(ui.databaseCommands, db ? db.commands.join("  →  ") : "Awaiting db_list");
-  let status = "Waiting for the first real database read.";
+  let status = "Waiting for the first database read.";
   if (db) {
-    status = !connected ? "Controller offline. This is the last observed listing."
-      : state.phase === "interrupted" || state.phase === "error" ? "Process offline. Last observed listing; recovery will reread it."
-        : state.phase === "starting" || awaitingRead ? "Reopening asmDB. Previous listing retained until the next read."
-          : state.phase === "stopping" ? "Stopping the runtime. The last actual read remains visible."
+    status = !connected ? "Offline. Last observed listing."
+      : state.phase === "interrupted" || state.phase === "error" ? "Rust stopped. Last listing retained; recovery will reread it."
+        : state.phase === "starting" || awaitingRead ? "Reopening. Previous listing shown until the next read."
+          : state.phase === "stopping" ? "Stopping Rust. Last observed records."
             : verifiedReplay() ? "Reread after restart. No new completions."
-              : state.phase === "finished" ? "Runtime finished. Last SELECT * response from this process."
-                : "Actual SELECT * response, not a projection of the task view.";
-  } else if (unobservedLegacyRun()) status = "Awaiting Play. The previous run is kept.";
-  else if (state?.run) status = "Run folder known. No database listing has been read by this controller yet.";
+              : state.phase === "finished" ? "Runtime finished. Last SELECT * response."
+                : "Real SELECT * rows. Native order, not chronological.";
+  } else if (unobservedLegacyRun()) status = "Previous run kept. Ready for a new conversation.";
+  else if (state?.run) status = "Run found. Waiting to read its database.";
   text(ui.databaseStatus, status);
   text(byId("database-provenance"), db && (retained || state?.phase === "finished") ? "Last SELECT * via MCP · same writer" : "SELECT * via MCP · same writer");
   const date = db ? new Date(db.at) : null;
@@ -1194,17 +1209,24 @@ function newEventNode(event) {
   const label = element("span", "event-label", eventLabels[event.event] ?? event.event);
   label.title = event.event;
   const context = element("span", "event-context");
-  if (event.task_id) context.append(element("code", "", `task ${event.task_id}`));
-  if (event.owner) context.append(element("code", "", event.owner));
+  if (event.task_id) context.append(element("code", "", `${isConversation() ? "turn" : "task"} ${event.task_id}`));
+  if (event.owner || event.agent_id) context.append(element("code", "", event.owner ?? event.agent_id));
   if (event.attempt != null) context.append(element("span", "", `attempt ${event.attempt}`));
-  if (event.artifact) context.append(element("code", "", event.artifact));
+  if (event.pid != null) context.append(element("code", "", `PID ${event.pid}`));
+  if (event.artifact) {
+    const value = String(event.artifact);
+    const hash = element("code", "", value.length > 16 ? `${value.slice(0, 12)}…` : value);
+    hash.title = value;
+    context.append(hash);
+  }
   if (event.message) context.append(element("span", "event-message", event.message));
   root.append(timeGroup, label, context);
   return root;
 }
 
 function renderEvents(freshEvents) {
-  const events = state?.events ?? [];
+  const all = state?.events ?? [];
+  const events = ui.allEvents.checked ? all : all.filter(event => !readEvents.has(event.event));
   const visible = events.slice(-EVENT_LIMIT).reverse();
   const fresh = new Set(freshEvents.map(eventKey));
   const keys = new Set(visible.map(eventKey));
@@ -1232,6 +1254,7 @@ function renderSources() {
 function render({ highlight = false, freshEvents = [] } = {}) {
   text(ui.connectionStatus, connected ? "Connected" : connectionError ? "Disconnected" : "Connecting");
   attribute(ui.connectionStatus, "data-connected", connected);
+  renderLayout();
   renderControls();
   renderStory();
   renderNotices();
@@ -1250,9 +1273,12 @@ function bindCommand(button, callback) {
   button.addEventListener("keydown", (event) => { if (event.repeat && ["Enter", " "].includes(event.key)) event.preventDefault(); });
 }
 
-ui.showConversation.addEventListener("click", () => setView("conversation"));
-ui.showStorage.addEventListener("click", () => setView("storage"));
-ui.evidence.addEventListener("toggle", () => { if (viewMode === "conversation") conversationEvidenceOpen = ui.evidence.open; });
+ui.openControls.addEventListener("click", () => { ui.controls.showModal(); ui.closeControls.focus({ preventScroll: true }); });
+ui.closeControls.addEventListener("click", () => ui.controls.close());
+ui.controls.addEventListener("close", () => ui.openControls.focus({ preventScroll: true }));
+ui.rawRecords.addEventListener("change", () => renderDatabase(false));
+ui.allEvents.addEventListener("change", () => renderEvents([]));
+bindCommand(ui.storageStart, () => { if (actionAllowed("storage")) { ui.controls.close(); void performAction("storage"); } });
 ui.latestReply.addEventListener("click", () => { ui.conversationScroll.scrollTop = ui.conversationScroll.scrollHeight; });
 ui.conversationStart.addEventListener("click", (event) => { if (event.detail > 1) event.preventDefault(); });
 ui.conversationForm.addEventListener("keydown", (event) => {
@@ -1264,7 +1290,7 @@ ui.conversationForm.addEventListener("submit", (event) => {
   if (activeAction || !actionAllowed(kind)) return;
   const topic = ui.topic.value.trim();
   if (kind === "conversation") {
-    const valid = topic.length >= 1 && topic.length <= 400;
+    const valid = [...topic].length >= 1 && [...topic].length <= 400 && !topic.includes("\0");
     attribute(ui.topic, "aria-invalid", !valid);
     ui.topicError.hidden = valid;
     text(ui.topicError, valid ? "" : "Enter a topic from 1 to 400 characters.");
@@ -1272,9 +1298,8 @@ ui.conversationForm.addEventListener("submit", (event) => {
   }
   void performAction(kind, kind === "conversation" ? { topic } : {});
 });
-ui.topic.addEventListener("input", () => { ui.topic.removeAttribute("aria-invalid"); ui.topicError.hidden = true; });
+ui.topic.addEventListener("input", () => { ui.topic.removeAttribute("aria-invalid"); ui.topicError.hidden = true; renderConversationControls(); renderConversation(); });
 bindCommand(ui.play, () => { void performAction(primaryAction()); });
-bindCommand(ui.stopCurrent, () => { void performAction("interrupt"); });
 bindCommand(ui.interrupt, () => { void performAction("interrupt"); });
 bindCommand(ui.resume, () => { void performAction("resume"); });
 bindCommand(ui.next, () => { void performAction("next"); });
@@ -1301,7 +1326,7 @@ for (const input of [ui.taskCount, ui.workDelay]) {
 }
 ui.retryConnection.addEventListener("click", () => { void poll(); });
 byId("dismiss-action-error").addEventListener("click", () => { actionError = null; renderNotices(); focusPrimary(); });
-for (const list of [ui.files, ui.decodedRows, ui.messages, ui.jobs]) {
+for (const list of [ui.files, ui.decodedRows, ui.messages, ui.jobs, ui.databaseRows]) {
   list.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-definition-id], button[data-task-id]");
     if (button && list.contains(button)) openInspector(button.dataset.definitionId ?? button.dataset.taskId, button);
@@ -1347,5 +1372,5 @@ themeToggle.addEventListener("click", () => {
 });
 systemTheme.addEventListener("change", () => { if (!chosenTheme) renderTheme(); });
 renderTheme();
-setView("conversation");
+render();
 void poll();
