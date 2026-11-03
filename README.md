@@ -4,6 +4,8 @@
   <p><strong>Agents stop. Work survives.</strong></p>
 </div>
 
+https://github.com/user-attachments/assets/a927841b-71b5-4895-8234-6aa3e1647997
+
 asmRT is a Rust runtime for recoverable agent workflows, built on **[asmDB, the assembly database](https://github.com/fredgis/asmDB)**.
 
 **Stateful agents, stateless LLM.** asmDB durably tracks jobs, claims and completion. Immutable JSON files preserve prompts, model settings and replies. asmRT uses that saved work to reconstruct each agent's context; the model itself keeps no memory between calls.
