@@ -73,13 +73,15 @@ ollama pull qwen3.5:0.8b
 
 Open **http://127.0.0.1:8787**, open the **8 workflows** picker, choose a diagrammed workflow, then click **Start conversation**. The same button pauses and resumes. For **Human approval**, read the proposal and explicitly approve or reject it. Keep the controller terminal open.
 
+![Eight diagrammed workflow choices in the same two-tab console](Docs/assets/screenshots/workflows.png)
+
 **Reset demo** stops the runtime and clears the view after confirmation. It preserves old run folders and waits for you to start a fresh run. To change the mission, reset, edit it in Details, then start. Refreshing or switching views does not restart the conversation. Pause holds future steps; an inference already running finishes at its next checkpoint.
 
 ## Eight ways to coordinate
 
 All eight use the same runtime, asmDB state and immutable context. These are executable, bounded workflow contracts, not just diagram presets. The four colored identities remain recognizable; their saved instructions define the specialist work.
 
-![Eight diagrammed workflow choices in the same two-tab console](Docs/assets/screenshots/workflows.png)
+[![asmRT: eight durable workflow patterns, from sequential relay to bounded agent loops](Docs/assets/asmrt-workflows-poster.png)](Docs/assets/asmrt-workflows-poster.png)
 
 | # | Workflow | What happens | Useful for |
 | --- | --- | --- | --- |
