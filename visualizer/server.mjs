@@ -8,17 +8,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { describeStory } from './story.mjs';
-import { conversationOptions, conversationTurns, describeConversation, localModelSettings, DISCUSSION, SEQUENTIAL } from './conversation-story.mjs';
+import { conversationOptions, conversationTurns, describeConversation, localModelSettings, DISCUSSION, SEQUENTIAL, WORKFLOWS } from './conversation-story.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = path.join(root, 'visualizer', 'public');
 const ownerMarker = 'asmrt-visualizer-v1\n';
 const activePhases = new Set(['starting', 'running', 'paused', 'stopping']);
-const checkpointStages = new Set(['ready', 'claimed', 'published', 'completed']);
+const checkpointStages = new Set(['ready', 'claimed', 'published', 'completed', 'approval']);
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/console-view.mjs', ['console-view.mjs', 'text/javascript; charset=utf-8']],
+  ['/workflow-catalog.mjs', ['workflow-catalog.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/workers.png', ['workers.png', 'image/png']],
 ]);
@@ -362,11 +363,14 @@ export async function createVisualizer({
     }
   }
 
-  async function advanceCheckpoint(id) {
+  async function advanceCheckpoint(id, action = 'next') {
     if (!child?.stdin?.writable || phase !== 'paused' || checkpoint?.id !== id) {
       throw new HttpError(409, 'This checkpoint has changed. Refresh before continuing.');
     }
-    const command = `next ${checkpoint.sequence}\n`;
+    if ((checkpoint.stage === 'approval') !== ['approve', 'reject'].includes(action)) {
+      throw new HttpError(409, 'An approval checkpoint requires an explicit approve or reject action; next cannot approve.');
+    }
+    const command = `${action} ${checkpoint.sequence}\n`;
     checkpoint = null;
     phase = 'running';
     await new Promise((resolve, reject) => child.stdin.write(command, failure => failure ? reject(failure) : resolve()));
@@ -490,7 +494,7 @@ export async function createVisualizer({
     append({ event: 'launching', message: 'Opening the Rust runtime and its single asmDB writer.' });
     const command = run.kind === 'conversation'
       ? ['chat', `--topic=${run.topic}`, '--model', run.model, '--ollama-url', run.ollama_url, '--rounds', String(run.rounds),
-        '--workflow', run.workflow === DISCUSSION ? 'discussion' : 'sequential']
+        '--workflow', run.workflow.slice('conversation.'.length)]
       : ['demo', '--tasks', String(run.tasks), '--workers', '4', '--work-ms', String(run.work_ms)];
     const process = spawn(binary, [
       '--asmdb-dir', asmdbDir, '--data-dir', run.directory,
@@ -571,6 +575,7 @@ export async function createVisualizer({
       if (request.headers.host !== host) throw new HttpError(403, 'Use the local address printed at startup.');
       const route = new URL(request.url, url).pathname;
       if (request.method === 'GET' && route === '/api/state') return send(response, 200, snapshot());
+      if (request.method === 'GET' && route === '/api/workflows') return send(response, 200, WORKFLOWS);
       if (request.method === 'GET' && route === '/favicon.ico') { response.writeHead(204); response.end(); return; }
       if (request.method === 'GET' && assets.has(route)) {
         const [filename, type] = assets.get(route);
@@ -599,7 +604,7 @@ export async function createVisualizer({
         }
         return send(response, 200, { task_id: definition[1], filename, sha256: reference.sha256, content: JSON.parse(bytes.toString('utf8')) });
       }
-      if (request.method !== 'POST' || !['/api/run', '/api/resume', '/api/interrupt', '/api/next', '/api/play', '/api/pause', '/api/conversation', '/api/storage', '/api/reset'].includes(route)) throw new HttpError(404, 'Unknown route.');
+      if (request.method !== 'POST' || !['/api/run', '/api/resume', '/api/interrupt', '/api/next', '/api/action', '/api/play', '/api/pause', '/api/conversation', '/api/storage', '/api/reset'].includes(route)) throw new HttpError(404, 'Unknown route.');
       if (request.headers.origin !== url || request.headers['x-asmrt-token'] !== token) {
         throw new HttpError(403, 'Commands are only allowed from this local view.');
       }
@@ -642,6 +647,11 @@ export async function createVisualizer({
             if (recovering) await launch();
             else await launch({ tasks: 8, work_ms: 600, guided: true }, true);
           }
+        } else if (route === '/api/action') {
+          if (!body || Object.keys(body).length !== 2 || typeof body.checkpoint !== 'string' || !['approve', 'reject'].includes(body.action)) {
+            throw new HttpError(400, 'Provide an approve or reject action and the exact checkpoint identity.');
+          }
+          await advanceCheckpoint(body.checkpoint, body.action);
         } else if (route === '/api/next') {
           if (!body || Object.keys(body).length !== 1 || typeof body.checkpoint !== 'string') {
             throw new HttpError(400, 'The exact current checkpoint identity is required.');

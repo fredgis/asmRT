@@ -1,8 +1,18 @@
-// Defines the two bounded conversation contracts and maps real runtime checkpoints to demo scenes.
+// Defines bounded conversation contracts and maps real runtime checkpoints to demo scenes.
 // Story pacing observes execution; it never fabricates replies or decides task dependencies.
 export const DEFAULT_TOPIC = 'Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.';
 export const SEQUENTIAL = 'conversation.sequential';
 export const DISCUSSION = 'conversation.discussion';
+export const WORKFLOWS = [
+  [SEQUENTIAL, 'Sequential', 'Each agent reads the preceding replies.', 'chain'],
+  [DISCUSSION, 'Discussion', 'Parallel peers debate before a final synthesis.', 'waves'],
+  ['conversation.graph', 'Graph', 'A committed router selects Node A or B; shared state merges the result.', 'conditional'],
+  ['conversation.roles', 'Roles', 'A manager delegates research and analysis, then reviews the writer.', 'delegation'],
+  ['conversation.approval', 'Approval', 'A human approves or rejects local receipt, report and notification artifacts.', 'human-gate'],
+  ['conversation.handoff', 'Handoff', 'Triage transfers ownership to billing or support before returning the result.', 'handoff'],
+  ['conversation.hybrid', 'Hybrid', 'Parallel subagents merge before bounded refinement and root synthesis.', 'parallel-loop'],
+  ['conversation.loop', 'Loop', 'Gather context, plan, inspect local artifacts, verify, and stop or retry within a cap.', 'bounded-loop'],
+].map(([kind, name, description, topology]) => ({ kind, version: 1, name, description, topology }));
 
 // Normalize only new-run settings; saved plans keep their original workflow and prompts.
 export function conversationOptions(options) {
@@ -17,13 +27,13 @@ export function conversationOptions(options) {
       || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
     throw new Error('Choose a topic of 1 to 400 characters and 1 to 3 rounds.');
   }
-  if (![SEQUENTIAL, DISCUSSION].includes(workflow)) throw new Error('Choose the sequential or discussion workflow.');
+  if (!WORKFLOWS.some(item => item.kind === workflow)) throw new Error('Choose a supported conversation workflow.');
   return { topic: topic.trim(), rounds, workflow };
 }
 
 // The observer validates this fixed topology against Rust's saved job dependencies.
 export function conversationTurns({ workflow = SEQUENTIAL, rounds = 2 }) {
-  if (![SEQUENTIAL, DISCUSSION].includes(workflow) || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
+  if (!WORKFLOWS.some(item => item.kind === workflow) || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
     throw new Error('Unsupported conversation topology.');
   }
   const turns = [];
@@ -33,11 +43,32 @@ export function conversationTurns({ workflow = SEQUENTIAL, rounds = 2 }) {
     for (let round = 0; round < rounds; round++) {
       for (const agent of ['planner', 'builder', 'critic', 'editor']) add(agent, prior());
     }
-  } else {
+  } else if (workflow === DISCUSSION) {
     add('planner', []);
     for (let round = 0; round < rounds; round++) {
       const inputs = prior();
       for (const agent of ['builder', 'critic', 'editor']) add(agent, inputs);
+    }
+    add('editor', prior());
+  } else if (['conversation.graph', 'conversation.handoff', 'conversation.roles', 'conversation.hybrid'].includes(workflow)) {
+    add('planner', []);
+    add('builder', ['1']);
+    add('critic', ['1']);
+    add('editor', prior());
+    if (workflow === 'conversation.roles') add('planner', prior());
+    if (workflow === 'conversation.hybrid') {
+      for (let round = 0; round < rounds; round++) {
+        add('builder', prior());
+        add('critic', prior());
+      }
+      add('editor', prior());
+    }
+  } else if (workflow === 'conversation.approval') {
+    for (const agent of ['planner', 'editor', 'builder', 'critic', 'editor']) add(agent, prior());
+  } else {
+    add('planner', []);
+    for (let round = 0; round < rounds; round++) {
+      for (const agent of ['builder', 'editor', 'critic']) add(agent, prior());
     }
     add('editor', prior());
   }
@@ -57,6 +88,7 @@ export function localModelSettings(model, endpoint) {
 // Sequential scenes retain the original single-turn crash/recovery demonstration.
 export function describeConversation({ phase, checkpoint, tasks, summary, conversation, run }) {
   if (run.workflow === DISCUSSION) return describeDiscussion({ phase, checkpoint, tasks, summary, conversation, run });
+  if (run.workflow !== SEQUENTIAL) return describeWorkflow({ phase, checkpoint, tasks, summary, conversation, run });
   const completed = tasks.filter(task => task.state === 'completed').length;
   const total = run.tasks * 3 + 5;
   const pizza = conversation?.topic === DEFAULT_TOPIC;
@@ -126,6 +158,33 @@ export function describeConversation({ phase, checkpoint, tasks, summary, conver
     'asmDB has its hash. The next agent can use this reply.',
     'Pass to the next agent', 'next', 1100, number * 3, 'database');
   return null;
+}
+
+function describeWorkflow({ phase, checkpoint, tasks, summary, conversation, run }) {
+  const descriptor = WORKFLOWS.find(item => item.kind === run.workflow);
+  const completed = tasks.filter(task => task.state === 'completed').length;
+  const total = run.tasks * 3 + 5;
+  const scene = (id, title, description, action, next_label, duration_ms = 1800) => ({
+    scene: { id: `chat-${id}`, chapter: descriptor.name, title, description, next_label, focus: 'conversation' },
+    action, duration_ms, index: Math.min(total - 1, completed * 3), total,
+  });
+  if (phase === 'finished') return summary?.completed_now === 0 && summary?.model_calls_now === 0
+    ? scene('verified', 'Saved results verified.', 'No new model calls. Control decisions and local artifacts were reused.', null, 'Start another workflow', 0)
+    : scene('completed', 'Workflow committed.', 'Restart to verify the same results and control decisions.', 'resume', 'Restart and verify');
+  if (phase === 'interrupted') return scene('reopen', 'Reopen the same workflow.', 'Only unfinished work resumes. Committed decisions survive.', 'resume', 'Reopen workflow');
+  if (phase === 'running') return scene('generating', 'Executing saved work.', 'Dependencies and control decisions come from committed artifacts.', null, 'Waiting for runtime', 0);
+  if (phase !== 'paused' || !checkpoint) return null;
+  if (checkpoint.stage === 'approval') return scene('approval', 'Human decision required.',
+    'Approve or reject this local-only demonstration. No charge or external notification will occur. Automatic playback cannot decide.',
+    null, 'Approve or reject', 0);
+  if (checkpoint.stage === 'ready') return scene('ready', descriptor.name, descriptor.description, 'next', 'Begin workflow');
+  const batch = checkpoint.task_ids.map(id => tasks.find(task => task.id === id)).filter(Boolean);
+  if (checkpoint.stage === 'claimed' && batch.some(task => task.id === '3' && task.attempt === '1')) {
+    return scene('crash-next', 'Interrupt before execution.', 'Saved dependencies and routing survive a real process restart.', 'interrupt', 'Stop runtime');
+  }
+  if (checkpoint.stage === 'published') return scene('saved', 'Artifacts saved.', 'Model replies, local results and skipped branches use the same durable hash commitment.', 'next', 'Commit artifacts', 4000);
+  if (checkpoint.stage === 'completed') return scene('committed', 'Checkpoint committed.', 'The next jobs can now consume these results.', 'next', 'Continue');
+  return scene('assigned', 'Jobs assigned.', 'Execute only the selected branch or local handler; retain the original job identity.', 'next', 'Execute');
 }
 
 // Discussion cues stop at whole-wave barriers, never between the three sibling requests.

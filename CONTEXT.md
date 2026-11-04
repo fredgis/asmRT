@@ -27,6 +27,21 @@ _Avoid_: Sequential relay, unlimited autonomous discussion, arbitrary DAG engine
 A role whose saved instructions, task progress and replies survive a process restart through asmRT, asmDB and immutable files. The LLM remains stateless; asmRT reconstructs its request context.
 _Avoid_: Permanent model memory, unlimited context.
 
+**Conditional graph / handoff**:
+A saved routing result selects a branch or specialist. Recovery follows that durable choice rather than asking the model to choose again.
+_Avoid_: Arbitrary user-programmable graph, fresh routing on every restart.
+
+**Role-based team / hybrid orchestration**:
+Known dependency patterns that delegate specialist work and merge committed results; independent jobs can run concurrently.
+
+**Human approval**:
+An explicit saved human decision that releases a blocked workflow. Starting or resuming automatic playback is not approval.
+_Avoid_: Model consent, inferred approval, exactly-once external effects.
+
+**Agent loop**:
+A bounded act/verify feedback cycle over saved context, with a fixed iteration budget.
+_Avoid_: Unlimited autonomous execution.
+
 **Turn**:
 One role's contribution represented by a durable task; turns in a discussion wave can execute concurrently.
 

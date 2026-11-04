@@ -1,5 +1,6 @@
 // Renders the local demo, preserving saved transcripts while workflow controls dispatch explicit controller commands.
 import { nativeRecordFields, conversationChapter, conversationMemory, conversationWorkflow, conversationActiveTurns, isConversationWorkflow, validConversation } from "/console-view.mjs";
+import { WORKFLOWS, workflowInfo, workflowSVG, workflowTurnCount } from "/workflow-catalog.mjs";
 
 const byId = (id) => document.getElementById(id);
 const ui = {
@@ -16,7 +17,8 @@ const ui = {
   conversationForm: byId("conversation-form"), topic: byId("conversation-topic"), topicHelp: byId("conversation-topic-help"),
   workflow: byId("workflow-picker"), workflowLegend: byId("workflow-legend"), workflowHelp: byId("workflow-help"),
   workflowTitle: byId("overview-workflow-title"), workflowDescription: byId("overview-workflow-description"),
-  workflowChain: byId("overview-workflow-chain"), workflowDiscussion: byId("overview-workflow-discussion"),
+  workflowDiagram: byId("overview-workflow-diagram"), workflowMenu: byId("workflow-menu"), workflowSelection: byId("workflow-selection"),
+  approval: byId("human-approval"), approve: byId("approve-workflow"), reject: byId("reject-workflow"),
   overviewRoster: byId("overview-agents"),
   topicError: byId("conversation-topic-error"), conversationStart: byId("start-conversation"),
   conversationButton: byId("conversation-button-label"), conversationIcon: byId("conversation-icon"),
@@ -129,6 +131,10 @@ let definitionRequest = null;
 let definitionView = null;
 const chatChapters = [...document.querySelectorAll("#conversation-rail > li")];
 const detailChoices = [...document.querySelectorAll('input[name="console-detail"]')];
+byId("workflow-options").innerHTML = WORKFLOWS.map(workflow =>
+  `<label class="workflow-option"><input type="radio" name="workflow" value="${workflow.kind}">
+  <span class="workflow-card"><span class="workflow-heading"><strong>${workflow.number} · ${workflow.name}</strong>
+  <span class="workflow-mini">${workflowSVG(workflow)}</span></span><span class="workflow-caption">${workflow.caption}</span></span></label>`).join("");
 const workflowChoices = [...document.querySelectorAll('input[name="workflow"]')];
 let selectedWorkflow = "conversation.sequential";
 let detailMode = "overview";
@@ -200,6 +206,12 @@ function displayedWorkflow() {
 
 function agentName(snapshot, id) {
   return snapshot?.agents.find(agent => agent.id === id)?.name ?? DEFAULT_AGENTS.find(agent => agent.id === id)?.name ?? id;
+}
+
+function controlLabel(message) {
+  if (!message.control) return "";
+  return message.control.kind === "human" ? "Human decision"
+    : message.control.skipped ? "Skipped path" : "Local workflow step";
 }
 
 function activeAgentNames(snapshot, turns) {
@@ -433,6 +445,8 @@ function markDisconnected(error) {
 
 function actionAllowed(kind) {
   if (!connected || !state?.csrf_token) return false;
+  if (kind === "action") return Boolean(isConversation() && state.phase === "paused"
+    && state.checkpoint?.stage === "approval" && state.pid != null);
   if (kind === "reset") return true;
   if (["conversation", "storage"].includes(kind)) return !workInFlight();
   if (kind === "pause") return Boolean((isConversation() || state.run?.story)
@@ -488,7 +502,7 @@ async function performAction(kind, options = {}) {
   // Drain an older GET before posting so it cannot overwrite the command response.
   if (pollInFlight) await pollInFlight;
   try {
-    if (!actionAllowed(kind) || (kind === "next" && state.checkpoint?.id !== payload.checkpoint)) {
+    if (!actionAllowed(kind) || (["next", "action"].includes(kind) && state.checkpoint?.id !== payload.checkpoint)) {
       throw new RequestError("The run changed before this command could be sent.", "http", 409);
     }
     acceptState(await requestJSON(`/api/${kind}`, { method: "POST", body: payload, token: state.csrf_token }));
@@ -556,6 +570,13 @@ function renderConversationControls() {
   attribute(ui.conversationForm, "aria-busy", busy);
   ui.workflow.disabled = busy || kind !== "conversation" || !actionAllowed("conversation");
   for (const choice of workflowChoices) choice.checked = choice.value === selectedWorkflow;
+  const selected = workflowInfo(selectedWorkflow);
+  text(ui.workflowSelection, `${selected.number} · ${selected.name}`);
+  if (ui.workflow.disabled) ui.workflowMenu.open = false;
+  const approval = isConversation() && state?.checkpoint?.stage === "approval";
+  ui.approval.hidden = !approval;
+  ui.approve.disabled = busy || !actionAllowed("action");
+  ui.reject.disabled = busy || !actionAllowed("action");
   text(ui.workflowLegend, isConversation() && ui.workflow.disabled ? "Saved demo" : "Demo for next run");
   text(ui.workflowHelp, !connected ? "Waiting for the controller. No run is changed."
     : ui.workflow.disabled ? "Reset demo to choose another. Saved files stay."
@@ -570,10 +591,11 @@ function renderConversationControls() {
   ui.topic.readOnly = kind !== "conversation" || busy || (isConversation() && activePhases.has(state.phase));
   const pizza = ui.topic.value.trim() === DEFAULT_TOPIC;
   text(ui.topicHelp, ui.topic.readOnly ? "Saved mission. Resume keeps the same instructions and history."
-    : pizza ? "Eight short replies. A broken oven. A real process crash." : "1-400 characters. Eight replies, with a real crash halfway through.");
-  let note = "One click. The rest is automatic.";
+    : pizza ? "Same mission, eight different ways to coordinate." : "1-400 characters. Saved context, real replies, recoverable execution.");
+  let note = selected.id === "approval" ? "Start, then review the proposal when approval is requested." : "One click. The rest is automatic.";
   if (!connected) note = state ? "Controller offline. Reconnecting..." : "Connecting to the local controller.";
   else if (busy) note = activeAction === "pause" ? "Pausing. In-flight model calls may finish first." : "Waiting for the controller.";
+  else if (approval) note = "Waiting for your decision. Playback cannot approve on your behalf.";
   else if (!isConversation() && workInFlight()) note = "Storage run active. Follow it below.";
   else if (!isConversation() && state.run) note = "Starts fresh. Previous run files are kept.";
   else if (kind === "pause") note = "Automatic playback. Pause for more reading time.";
@@ -630,11 +652,11 @@ function renderMessages(snapshot) {
     attribute(entry.root, "data-committed", message.committed);
     attribute(entry.root, "data-reused", message.reused);
     text(entry.speaker, message.agent_name);
-    text(entry.turn, `Turn ${message.task_id} / ${total}`);
+    text(entry.turn, `${message.control ? "Step" : "Turn"} ${message.task_id} / ${total}`);
     text(entry.committed, message.committed ? "asmDB completed" : "Completion pending");
     text(entry.body, message.text);
     text(entry.inputs, message.input_ids.length ? `Inputs: turns ${message.input_ids.join(", ")}` : "Input: saved topic");
-    const metrics = [];
+    const metrics = message.control ? [controlLabel(message)] : [];
     if (Number.isFinite(message.completion_tokens)) metrics.push(`${message.completion_tokens} output tokens`);
     if (Number.isFinite(message.duration_ms)) metrics.push(`${(message.duration_ms / 1000).toFixed(1)}s`);
     text(entry.metrics, metrics.join(" · "));
@@ -690,14 +712,13 @@ function renderConversation() {
   const snapshot = conversationSnapshot();
   const messages = snapshot?.messages ?? [];
   const activeTurns = conversationActiveTurns(snapshot);
-  const discussion = displayedWorkflow().kind === "conversation.discussion";
   const playback = current ? state.playback : null;
   const liveProcess = hasLiveConversationProcess();
   const stopped = current && ["interrupted", "error", "stopping"].includes(state.phase);
   const retained = current && (!connected || !state.conversation || ["starting", "stopping", "interrupted", "error"].includes(state.phase));
   const liveTurns = liveProcess && !retained ? conversationActiveTurns(state.conversation) : [];
   const generating = liveTurns.some(turn => turn.stage === "generating");
-  const total = snapshot?.turns_total ?? (current ? state.run.tasks : 8);
+  const total = snapshot?.turns_total ?? (current ? state.run.tasks : workflowTurnCount(selectedWorkflow));
   const retries = activeTurns.map(turn => ({ turn, task: state?.tasks.find(task => task.id === turn.task_id) }))
     .filter(({ task }) => task && wasRetried(task.attempt));
   const scene = playback?.scene;
@@ -713,7 +734,7 @@ function renderConversation() {
     text(agent.role, definition.role);
     attribute(agent.portrait, "aria-label", `${definition.name} robot portrait`);
     const replies = messages.filter((message) => message.agent_id === agent.id);
-    let status = !current ? "Ready" : discussion ? "Waiting for dependencies" : "Waiting for turn";
+    let status = !current ? "Ready" : "Waiting for dependencies";
     let key = "ready";
     if (replies.length) { status = `${replies.length} ${replies.length === 1 ? "reply" : "replies"} saved`; key = "saved"; }
     const active = liveTurns.find(turn => turn.agent_id === agent.id);
@@ -731,10 +752,8 @@ function renderConversation() {
   const pizza = (snapshot?.topic ?? ui.topic.value.trim()) === DEFAULT_TOPIC;
   text(ui.conversationTitle, scene?.title ?? (stopped ? "Conversation stopped" : current ? "Opening saved work" : pizza ? "Can they save pizza night?" : "The team has a mission."));
   text(ui.conversationDescription, scene?.description ?? (current ? "Reading saved jobs and replies from this run."
-    : discussion ? "Planner seeds the debate. Builder, Critic and Editor exchange in parallel rounds, then Editor synthesizes. Each round waits for all three replies."
-      : "Four roles, one local model. Each agent reads the previous replies."));
-  text(ui.conversationTurn, discussion ? `${messages.length} / ${total} saved${liveTurns.length ? ` · ${liveTurns.length} active` : ""}`
-    : `${current ? activeTurns[0]?.task_id ?? messages.length : 0} / ${total}`);
+    : workflowInfo(displayedWorkflow().kind).description));
+  text(ui.conversationTurn, `${messages.length} / ${total} saved${liveTurns.length ? ` · ${liveTurns.length} active` : ""}`);
   text(ui.conversationRuntime, !current ? "Not started" : !connected ? "Process unconfirmed" : state.phase === "stopping" ? "Stopping Rust" : stopped ? "Rust stopped"
     : state.phase === "starting" ? "Opening runtime" : state.phase === "finished" ? "Rust finished"
       : liveProcess ? `${playback?.status === "paused" ? "Paused" : "Running"}${detailMode === "deep" ? ` / PID ${state.pid}` : ""}` : "Awaiting runtime");
@@ -749,7 +768,7 @@ function renderConversation() {
   text(byId("conversation-clock"), !current ? "Automatic" : !connected ? "Offline" : verifiedReplay() ? "Verified"
     : playback?.status === "paused" ? "Paused" : generating ? "Generating..."
       : playback?.remaining_ms > 0 ? `Next in ${Math.ceil(playback.remaining_ms / 1000)}s` : stopped ? "Stopped" : state.phase === "finished" ? "Finished" : "Working...");
-  let activity = "Local inference through Ollama. No scripted replies.";
+  let activity = "Model replies are generated locally. Control steps are recorded separately.";
   if (current) {
     if (!connected) activity = "Disconnected. Live activity cannot be confirmed.";
     else if (state.phase === "stopping") activity = "Stopping Rust. Saved replies stay visible.";
@@ -758,7 +777,7 @@ function renderConversation() {
     else if (verifiedReplay()) activity = "Reopened and checked. No new model calls.";
     else if (liveTurns.length) {
       activity = liveTurns.map(turn => `${agentName(snapshot, turn.agent_id)}: turn ${turn.task_id} ${turn.stage}; input ${turnInputs(turn)}`).join(" · ");
-      if (discussion && generating) activity += ". Debate requests launch together; the local provider may queue inference.";
+      if (liveTurns.length > 1 && generating) activity += ". Requests launch together; the local provider may queue inference.";
     }
     else if (playback?.status === "paused") activity = "Paused. Take your time; saved replies stay here.";
     else if (state.phase === "finished") activity = playback?.status === "playing" ? "All replies saved. Next: restart and verify." : "Conversation finished. All replies are on disk.";
@@ -787,10 +806,9 @@ function renderOverview() {
   const current = isConversation();
   const snapshot = conversationSnapshot();
   const messages = snapshot?.messages ?? [];
-  const total = snapshot?.turns_total ?? (current ? state.run.tasks : 8);
+  const total = snapshot?.turns_total ?? (current ? state.run.tasks : workflowTurnCount(selectedWorkflow));
   const workflow = displayedWorkflow();
-  const discussion = workflow.kind === "conversation.discussion";
-  const rounds = snapshot?.rounds ?? (current ? state.run.rounds : null) ?? 2;
+  const info = workflowInfo(workflow.kind);
   const liveTurns = hasLiveConversationProcess() && state.conversation ? conversationActiveTurns(state.conversation) : [];
   const generatingTurns = liveTurns.filter(turn => turn.stage === "generating");
   const savedTurns = liveTurns.filter(turn => turn.stage === "saved");
@@ -808,13 +826,13 @@ function renderOverview() {
   const chapter = conversationChapter(scene, current ? state.tasks : []);
   const verified = current && verifiedReplay();
 
-  const topology = discussion
-    ? `Planner seed → Builder / Critic / Editor in parallel × ${rounds} shared ${rounds === 1 ? "round" : "rounds"} → Editor synthesis.`
-    : `Planner → Builder → Critic → Editor · ${rounds} ${rounds === 1 ? "round" : "rounds"}, one role at a time.`;
-  text(ui.workflowTitle, `${discussion ? "Discussion" : "Relay"} · ${current ? "saved run" : "next run"}`);
+  const topology = info.description;
+  text(ui.workflowTitle, `${info.name} · ${current ? "saved run" : "next run"}`);
   text(ui.workflowDescription, topology);
-  ui.workflowChain.toggleAttribute("hidden", discussion);
-  ui.workflowDiscussion.toggleAttribute("hidden", !discussion);
+  if (ui.workflowDiagram.dataset.kind !== info.kind) {
+    ui.workflowDiagram.innerHTML = workflowSVG(info);
+    ui.workflowDiagram.dataset.kind = info.kind;
+  }
   attribute(ui.overviewRoster, "data-workflow", workflow.kind);
   attribute(ui.overviewRoster, "aria-label", topology);
   attribute(ui.roster, "aria-label", topology);
@@ -828,13 +846,14 @@ function renderOverview() {
     else if (state.phase === "interrupted") status = "Runtime stopped. Memory stays.";
     else if (state.phase === "starting" || !state.conversation) status = "Reading saved work...";
     else if (verified) status = "Replay verified.";
+    else if (state.checkpoint?.stage === "approval") status = "Waiting for your approval.";
     else if (generatingTurns.length) status = `${activeAgentNames(snapshot, generatingTurns)} ${generatingTurns.length === 1 ? "is" : "are"} thinking...`;
     else if (state.playback?.status === "paused") status = "Paused. Take your time.";
     else if (state.phase === "finished") status = state.playback?.status === "playing" ? "Checking what survived..." : "Conversation finished.";
     else if (scene === "chat-crash-next") status = "Next up: a real process crash.";
     else if (savedTurns.length) status = `${activeAgentNames(snapshot, savedTurns)}: ${savedTurns.length === 1 ? "reply" : "replies"} saved.`;
     else if (assignedTurns.length) status = `${activeAgentNames(snapshot, assignedTurns)}: assigned.`;
-    else status = discussion ? "Waiting for the next round or synthesis." : "Passing the conversation along.";
+    else status = "Waiting for the next ready step.";
   }
   text(ui.overviewStatus, status);
   attribute(ui.overview, "data-retained", retained);
@@ -869,7 +888,7 @@ function renderOverview() {
       overviewMessageNodes.set(reply.task_id, entry);
     }
     attribute(entry.root, "data-speaker", reply.agent_id);
-    text(entry.speaker, reply.agent_name);
+    text(entry.speaker, `${reply.agent_name}${reply.control ? ` · ${controlLabel(reply)}` : ""}`);
     text(entry.body, reply.text);
     return entry.root;
   });
@@ -1459,7 +1478,7 @@ function renderSources() {
   text(ui.sourceBridge, state?.source?.bridge ?? "Not reported");
   text(ui.sourceMode, state?.source?.mode ?? "Not reported");
   text(ui.sourceDirectory, state?.run?.directory ?? "No run");
-  text(ui.sourceRun, isConversation() ? `${state.run.id}: ${state.run.tasks} ${displayedWorkflow().kind === "conversation.discussion" ? "discussion turns with parallel debate rounds" : "sequential turns"}, 4 roles, one shared ${state.run.model} model`
+  text(ui.sourceRun, isConversation() ? `${state.run.id}: ${state.run.tasks} turns · ${workflowInfo(displayedWorkflow().kind).name}, 4 roles, one shared ${state.run.model} model`
     : state?.run ? `${state.run.id}: ${state.run.tasks} tasks, ${state.run.workers} workers, ${state.run.work_ms} ms teaching delay` : "No run");
 }
 
@@ -1532,15 +1551,28 @@ ui.conversationForm.addEventListener("submit", (event) => {
 for (const choice of workflowChoices) choice.addEventListener("change", () => {
   if (!choice.checked || ui.workflow.disabled || !isConversationWorkflow(choice.value)) return;
   selectedWorkflow = choice.value;
+  ui.workflowMenu.open = false;
+  ui.workflowMenu.querySelector("summary").focus();
   renderConversationControls();
   renderConversation();
   renderOverview();
+});
+ui.workflowMenu.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    ui.workflowMenu.open = false;
+    ui.workflowMenu.querySelector("summary").focus();
+  }
+});
+ui.workflowMenu.querySelector("summary").addEventListener("click", event => {
+  if (ui.workflow.disabled) event.preventDefault();
 });
 ui.topic.addEventListener("input", () => { ui.topic.removeAttribute("aria-invalid"); ui.topicError.hidden = true; renderConversationControls(); renderConversation(); renderOverview(); });
 bindCommand(ui.play, () => { void performAction(primaryAction()); });
 bindCommand(ui.interrupt, () => { void performAction("interrupt"); });
 bindCommand(ui.resume, () => { void performAction("resume"); });
 bindCommand(ui.next, () => { void performAction("next"); });
+bindCommand(ui.approve, () => { void performAction("action", { action: "approve", checkpoint: state.checkpoint?.id }); });
+bindCommand(ui.reject, () => { void performAction("action", { action: "reject", checkpoint: state.checkpoint?.id }); });
 ui.start.addEventListener("click", (event) => { if (event.detail > 1) event.preventDefault(); });
 ui.form.addEventListener("keydown", (event) => {
   if (event.repeat && event.key === "Enter") event.preventDefault();

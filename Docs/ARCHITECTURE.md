@@ -1,6 +1,6 @@
 # asmRT architecture reference
 
-asmRT is a Rust agent runtime with durable execution backed by the existing, unchanged asmDB engine. This reference documents its execution, persistence and recovery contracts. The supplied applications are real local-model conversations, sequential or parallel, and a deterministic concurrent storage demo.
+asmRT is a Rust agent runtime with durable execution backed by the existing, unchanged asmDB engine. This reference documents its execution, persistence and recovery contracts. The supplied applications are eight bounded agent workflow types and a deterministic concurrent storage demo.
 
 The central boundary is simple: **handlers execute work; one State Actor serializes durable task transitions; external files contain the work definitions and results.** Recovery reconstructs known work from those files and task records. It does not restore a stopped process's memory or resume arbitrary code.
 
@@ -90,7 +90,7 @@ flowchart TB
 
 The invariant is **one coordinator per database**, not merely one connection per caller. Cloning `StateHandle` does not create another actor. A second `Runtime::open` against an already owned database is rejected by the backend's writer exclusion. The `.asmrt-owner` file is an ownership-format marker, not the writer lock.
 
-The deterministic demo can run multiple Rust workers concurrently. Conversations use either sequential turns or parallel debate waves. In all cases, native state operations are serialized through the same actor; concurrent model requests do not create concurrent database writers. There is no FFI link to asmDB and no modification to its sources or file format.
+The deterministic demo can run multiple Rust workers concurrently. Agent workflows combine ordered turns, parallel dependencies and explicit control decisions. In all cases, native state operations are serialized through the same actor; concurrent model requests do not create concurrent database writers. There is no FFI link to asmDB and no modification to its sources or file format.
 
 ## 2. State Actor and task lifecycle
 
@@ -292,7 +292,7 @@ Shutdown sends EOF by closing bridge stdin. The existing bridge's shutdown hook 
 
 Implementation entry point: [chat.rs](../src/chat.rs). The controller invokes this known Rust handler; it does not generate executable agent programs.
 
-Two [workflow contracts](WORKFLOWS.md) define ordering, inputs, completion and retries: **Workflow 1: sequential conversation** (`conversation.sequential` v1) and **Workflow 2: discussion** (`conversation.discussion` v1). Workflow versions are independent of handler/schema versions. Neither contract introduces a generic workflow engine.
+Eight [workflow contracts](WORKFLOWS.md) define ordering, inputs, completion and retries: sequential, discussion, conditional graph, role-based team, human approval, handoff, hybrid orchestration and agent loop. Workflow versions are independent of handler/schema versions. These are known, bounded contracts, not a user-defined workflow programming language.
 
 The agents are **stateful at the runtime level**: durable tasks and immutable instructions/replies survive process restarts. The LLM remains stateless between requests; asmRT supplies the relevant saved context again.
 
@@ -446,7 +446,7 @@ The console offers two presentations of the **same run**, not independent execut
 
 The native radio selection is keyboard-operable and stored only in browser local storage. View switches and reply browsing issue no runtime command or model call. A previously checked raw-field option cannot spill technical JSON into Overview. Errors and retained-state notices remain visible in both modes. Responsive layouts stack the panes rather than shrinking the content into unreadable columns.
 
-The diagrammed selector chooses [**Workflow 1 · Sequential** or **Workflow 2 · Discussion**](WORKFLOWS.md) before a new run. The saved-plan inspector identifies the active type separately from the task-handler version. A saved run keeps its workflow; reset starts a fresh choice rather than changing its history. Multiple robots can be genuinely active during a discussion wave.
+The diagrammed selector offers [**eight workflow types**](WORKFLOWS.md) before a new run. The saved-plan inspector identifies the active type separately from the task-handler version. A saved run keeps its workflow; reset starts a fresh choice rather than changing its history. Multiple robots can be genuinely active during parallel work. Human approval has explicit decision controls shared by both views.
 
 `ready.conversation.turns` supplies each job's role and dependency IDs. The controller tracks `conversation.active_turns` independently, clears only the completed job, and sorts observed replies by task ID. `conversation.active` remains the first active turn or null for older readers. Workflow 2 restores completed sibling gaps without pretending its messages form a sequential prefix.
 
@@ -493,10 +493,11 @@ Command routes require the exact local `Origin`, JSON input, and `X-Asmrt-Token`
 | Route | Purpose |
 | --- | --- |
 | `GET /api/state` | Current controller observations, messages, playback, last database response, and command token |
-| `POST /api/conversation` | Start a new conversation; optional topic of 1–400 Unicode characters, rounds 1–3 (default 2), and canonical `workflow` string (`conversation.sequential` by default, or `conversation.discussion`) |
+| `POST /api/conversation` | Start a new conversation; optional topic of 1–400 Unicode characters, rounds 1–3 (default 2), and a canonical `workflow` string from the eight-type registry (`conversation.sequential` by default) |
 | `POST /api/storage` | Start the separate deterministic storage story |
 | `POST /api/play` | Start/resume automatic playback of the current story |
 | `POST /api/pause` | Pause future automatic transitions |
+| `POST /api/action` | Explicit human decision: `{action: "approve" or "reject", checkpoint: current checkpoint ID}`; accepted only at the approval gate |
 | `POST /api/interrupt` | Interrupt the owned runtime |
 | `POST /api/resume` | Reopen/resume the saved run without automatically starting playback |
 | `POST /api/reset` | Stop and clear the selected demo, preserve saved runs; 202 with fresh idle state |
@@ -513,6 +514,8 @@ A new conversation does not silently terminate already active work. Checkpoint c
 The guided deterministic demo claims up to the configured worker count, waits, publishes that batch's files, waits again, then commits its completions. A partial last batch is valid. A fully completed demo replay rereads the database and exits without needing stdin or doing new work. The controller uses acknowledged gates rather than a browser-side animation to direct execution.
 
 Guided chat uses the same stages. Sequential checkpoints contain one turn; discussion checkpoints contain the seed, a debate wave, the unfinished subset of a recovered wave, or the synthesis. One shared stdin continuation releases each gate; concurrent jobs do not race to read commands. A completed chat replay exits without requiring another guided continuation.
+
+The human-gated workflow adds stage `approval`. It is not released by automatic playback or a generic Next command; the browser sends an explicit decision for the current checkpoint. Its saved decision and local action artifacts are described in the [workflow contracts](WORKFLOWS.md).
 
 ## 8. Directories and source map
 
@@ -541,7 +544,7 @@ repo-asmrt\
 ├── visualizer\                Node controller, browser assets, and HTTP tests
 ├── Docs\
 │   ├── ARCHITECTURE.md         This implementation reference
-│   ├── WORKFLOWS.md            Sequential/discussion contracts and version registry
+│   ├── WORKFLOWS.md            Eight workflow contracts and version registry
 │   ├── diagrams\              Editable Mermaid sources
 │   ├── architecture\          Preserved older HTML/SVG/JSON concept material
 │   └── assets\                Preserved banner/posters and demonstration images
@@ -631,7 +634,7 @@ The launcher runs `cargo build --locked --quiet` unless `-SkipBuild` is specifie
 
 Global `--asmdb-dir`/`--data-dir` options precede the `chat`, `demo`, or `status` subcommand. Quote `'--'` when forwarding Cargo arguments through PowerShell.
 
-For a different new conversation, use a new directory and `--topic 'Your topic'`, optionally `--workflow sequential|discussion`, `--rounds`, `--model`, and `--ollama-url`. An omitted workflow preserves an existing plan's type; an explicitly different workflow is rejected. `ASMRT_OLLAMA_MODEL` and `ASMRT_OLLAMA_URL` also configure the local provider. The Node controller accepts its own `--conversation-model` and `--ollama-url` options. Saved jobs retain their original settings; these options are not a way to rewrite an existing run.
+For a different new conversation, use a new directory and `--topic 'Your topic'`, optionally `--workflow sequential|discussion|graph|roles|approval|handoff|hybrid|loop`, `--rounds`, `--model`, and `--ollama-url`. An omitted workflow preserves an existing plan's type; an explicitly different workflow is rejected. `ASMRT_OLLAMA_MODEL` and `ASMRT_OLLAMA_URL` also configure the local provider. The Node controller accepts its own `--conversation-model` and `--ollama-url` options. Saved jobs retain their original settings; these options are not a way to rewrite an existing run.
 
 ### Deterministic coordination without Ollama
 

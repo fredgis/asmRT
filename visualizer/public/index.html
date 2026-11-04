@@ -46,16 +46,10 @@
             </div>
             <fieldset id="workflow-picker" class="workflow-picker" aria-describedby="workflow-help" disabled>
               <legend id="workflow-legend">Demo for next run</legend>
-              <div class="workflow-options">
-                <label class="workflow-option">
-                  <input type="radio" name="workflow" value="conversation.sequential" checked>
-                  <span class="workflow-card"><span class="workflow-heading"><strong>1 · Relay</strong><svg class="workflow-mini" viewBox="0 0 64 32" width="48" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="6" cy="16" r="3"/><circle cx="23" cy="16" r="3"/><circle cx="41" cy="16" r="3"/><circle cx="58" cy="16" r="3"/><path d="M10 16h9m-3-3 3 3-3 3M27 16h10m-3-3 3 3-3 3M45 16h9m-3-3 3 3-3 3"/></svg></span><span id="workflow-sequential-note" class="workflow-caption">One role at a time.</span></span>
-                </label>
-                <label class="workflow-option">
-                  <input type="radio" name="workflow" value="conversation.discussion">
-                  <span class="workflow-card"><span class="workflow-heading"><strong>2 · Discussion</strong><svg class="workflow-mini" viewBox="0 0 64 32" width="48" height="24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="6" cy="16" r="3"/><circle cx="31" cy="5" r="3"/><circle cx="31" cy="16" r="3"/><circle cx="31" cy="27" r="3"/><circle cx="58" cy="16" r="3"/><path d="M9 16h9V5h9m-9 11h9m-9 0v11h9M35 5h10v22H35M35 16h20m-3-3 3 3-3 3"/></svg></span><span id="workflow-discussion-note" class="workflow-caption">Debate, then synthesize.</span></span>
-                </label>
-              </div>
+              <details id="workflow-menu" class="workflow-menu">
+                <summary><span id="workflow-selection">1 · Relay</span><span class="workflow-menu-hint">8 workflows</span></summary>
+                <div id="workflow-options" class="workflow-options"></div>
+              </details>
               <p id="workflow-help" class="section-help">Choose a demo, then Start. Same local model.</p>
             </fieldset>
             <div class="conversation-transport">
@@ -67,14 +61,18 @@
               <span id="reset-hint" class="sr-only">Stops playback and clears this view. Previous run folders are kept. Start conversation begins a new run.</span>
             </div>
           </form>
+          <section id="human-approval" class="human-approval" aria-labelledby="human-approval-title" hidden>
+            <div><h3 id="human-approval-title">Your decision is required</h3><p>Read the saved proposal below. Approve the local demo actions, or reject to skip them. Your decision is saved with this run.</p></div>
+            <button id="approve-workflow" class="button button-primary" type="button">Approve</button>
+            <button id="reject-workflow" class="button" type="button">Reject &amp; skip actions</button>
+          </section>
         </section>
         <!-- Full chronological replies retain stable nodes while independent branches publish their results. -->
         <section id="overview-stage" class="overview-stage" aria-label="A conversation that survives a restart">
           <section class="team-scene" aria-labelledby="team-title">
             <header class="scene-heading"><h2 id="team-title"><span class="scene-wordmark">asm<b>RT</b></span><span class="scene-caption">The team</span></h2><p id="overview-status" class="overview-status" role="status" aria-live="polite">Ready when you are.</p></header>
             <div class="workflow-topology">
-              <svg id="overview-workflow-chain" viewBox="0 0 64 32" width="64" height="32" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="6" cy="16" r="3"/><circle cx="23" cy="16" r="3"/><circle cx="41" cy="16" r="3"/><circle cx="58" cy="16" r="3"/><path d="M10 16h9m-3-3 3 3-3 3M27 16h10m-3-3 3 3-3 3M45 16h9m-3-3 3 3-3 3"/></svg>
-              <svg id="overview-workflow-discussion" viewBox="0 0 64 32" width="64" height="32" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false" hidden><circle cx="6" cy="16" r="3"/><circle cx="31" cy="5" r="3"/><circle cx="31" cy="16" r="3"/><circle cx="31" cy="27" r="3"/><circle cx="58" cy="16" r="3"/><path d="M9 16h9V5h9m-9 11h9m-9 0v11h9M35 5h10v22H35M35 16h20m-3-3 3 3-3 3"/></svg>
+              <span id="overview-workflow-diagram" class="workflow-diagram" aria-hidden="true"></span>
               <p><strong id="overview-workflow-title">Relay · next run</strong><span id="overview-workflow-description">Planner → Builder → Critic → Editor · 2 rounds, one role at a time.</span></p>
             </div>
             <ol id="overview-agents" class="overview-agents" data-workflow="conversation.sequential" aria-label="Workflow 1: Planner, Builder, Critic, then Editor. One agent at a time.">
@@ -97,7 +95,7 @@
           </section>
           <section id="overview-memory" class="memory-scene" aria-labelledby="memory-title">
             <header class="scene-heading"><h2 id="memory-title"><span class="scene-wordmark">asm<b>DB</b></span><span class="scene-caption">The memory</span></h2><svg class="memory-symbol" viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="24" cy="11" rx="16" ry="6"/><path d="M8 11v25c0 8 32 8 32 0V11M8 23c0 8 32 8 32 0"/><path d="m20 33 3 3 6-7"/></svg></header>
-            <div class="memory-tally"><strong><span id="overview-memory-count">0</span><span class="memory-total"> / <span id="overview-memory-total">8</span></span></strong><p>turns committed</p></div>
+            <div class="memory-tally"><strong><span id="overview-memory-count">0</span><span class="memory-total"> / <span id="overview-memory-total">8</span></span></strong><p>steps committed</p></div>
             <ol id="overview-memory-cells" class="memory-cells" aria-label="Turn records from asmDB. Published replies can be selected."></ol>
             <p id="overview-memory-note" class="memory-note">Nothing saved yet.</p>
             <div id="overview-proof" class="overview-proof" hidden><span aria-hidden="true">✓</span><p><strong>Restarted. Still here.</strong><span>No new model calls on replay.</span></p></div>

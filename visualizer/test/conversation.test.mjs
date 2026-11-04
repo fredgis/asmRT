@@ -2,17 +2,31 @@
 // Saved bytes, causal context and request gates distinguish recovery from fresh or sequential inference.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { createVisualizer } from '../server.mjs';
+import { describeConversation } from '../conversation-story.mjs';
 
 const asmdbDir = process.env.ASMRT_ASMDB_REPO;
 const enabled = { skip: !asmdbDir, timeout: 45000 };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
+test('every new workflow crashes once at the claimed third task, never at the human gate', () => {
+  for (const kind of ['graph', 'roles', 'approval', 'handoff', 'hybrid', 'loop']) {
+    const state = { phase: 'paused', run: { workflow: `conversation.${kind}`, tasks: 5 },
+      checkpoint: { stage: 'claimed', task_ids: ['3'] }, tasks: [{ id: '3', state: 'running', attempt: '1' }] };
+    assert.equal(describeConversation(state).action, 'interrupt', kind);
+    state.tasks[0].attempt = '2';
+    assert.equal(describeConversation(state).action, 'next', `${kind} must not crash again after recovery`);
+    if (kind === 'approval') {
+      state.checkpoint.stage = 'approval';
+      assert.equal(describeConversation(state).action, null, 'a human gate must remain blocked');
+    }
+  }
+});
 
 async function fixture(t, options = {}) {
   const requests = [];
@@ -40,14 +54,16 @@ async function fixture(t, options = {}) {
     const body = JSON.parse(raw.toString('utf8'));
     requests.push({ raw, body });
     const name = /^You are (\w+)\b/.exec(body.messages[0].content)?.[1] ?? 'Unknown';
-    const text = `${name} test-only reply ${requests.length}: a unique idea-${requests.length} from the saved discussion.`;
+    const text = options.reply?.(body) ?? `${name} test-only reply ${requests.length}: a unique idea-${requests.length} from the saved discussion.`;
     if (gate) await gate;
     replies.push(text);
     send(200, { model: 'fixture-chat:tiny', done: true, done_reason: 'stop',
       message: { role: 'assistant', content: text }, prompt_eval_count: 100 + requests.length, eval_count: 20 });
   });
   await new Promise(resolve => model.listen(0, '127.0.0.1', resolve));
-  const dataRoot = await mkdtemp(path.join(tmpdir(), 'asmrt-conversation-test-'));
+  const testRoot = path.resolve('.asmrt', 'backend-tests');
+  await mkdir(testRoot, { recursive: true });
+  const dataRoot = await mkdtemp(path.join(testRoot, 'conversation-'));
   const settings = { asmdbDir, binary: process.env.ASMRT_TEST_BINARY, dataRoot, port: 0, conversationModel: 'fixture-chat:tiny',
     ollamaUrl: `http://127.0.0.1:${model.address().port}`, storySceneMs: 180, ...options };
   let controller;
@@ -121,6 +137,104 @@ async function assertPreserved(files) {
     assert.equal((await stat(file.filename)).mtimeMs, file.modified);
   }
 }
+
+test('six workflow handlers persist distinct control semantics and replay without model access', { ...enabled, timeout: 120000 }, async t => {
+  for (const [workflow, total, calls] of [['graph', 4, 3], ['roles', 5, 5], ['approval', 5, 1],
+    ['handoff', 4, 3], ['hybrid', 9, 7], ['loop', 8, 4]]) {
+    await t.test(workflow, async t => {
+      const f = await fixture(t, { storySceneMs: 60000, reply: body => {
+        const id = body.options.seed - 42;
+        if (id === 1 && workflow === 'graph') return 'Use the direct path.\nROUTE=A';
+        if (id === 1 && workflow === 'handoff') return 'This is a billing question.\nROUTE=BILLING';
+        if ((workflow === 'hybrid' && id === 6) || (workflow === 'loop' && id === 4)) return 'The bounded local goal is satisfied.\nRESULT=DONE';
+        return `Fixture specialist result for ${workflow} task ${id}.`;
+      } });
+      let state = await startPaused(f, { workflow: `conversation.${workflow}`, rounds: 2 });
+      const catalog = await (await f.get('/api/workflows')).json();
+      assert.equal(catalog.length, 8);
+      assert.equal(state.conversation.turns_total, total);
+      let crashed = false;
+      while (state.phase !== 'finished') {
+        const checkpoint = state.checkpoint;
+        assert(checkpoint);
+        if (checkpoint.stage === 'approval') {
+          assert.equal((await f.post('next', { checkpoint: checkpoint.id })).status, 409);
+          assert.equal((await f.post('play')).status, 202);
+          await delay(250);
+          assert.equal((await f.state()).checkpoint.id, checkpoint.id, 'autoplay must not approve');
+          assert.equal((await f.post('pause')).status, 202);
+          assert.equal((await f.post('action', { action: 'approve', checkpoint: checkpoint.id })).status, 202);
+        } else if (!crashed && ['graph', 'approval'].includes(workflow) && checkpoint.stage === 'published' && checkpoint.task_ids[0] === '2') {
+          const files = await savedFiles(state.run, checkpoint.task_ids);
+          const before = f.requests.length;
+          assert.equal((await f.post('interrupt')).status, 202);
+          await f.restart();
+          assert.equal((await f.post('resume')).status, 202);
+          state = await until(f.state, s => s.checkpoint?.stage === 'ready', 'no reopened workflow');
+          assert.equal((await f.post('action', { action: 'reject', checkpoint: checkpoint.id })).status, 409);
+          await assertPreserved(files);
+          assert.equal(f.requests.length, before);
+          crashed = true;
+          continue;
+        } else {
+          assert.equal((await f.post('next', { checkpoint: checkpoint.id })).status, 202);
+        }
+        state = await until(f.state, s => s.phase === 'finished' || (s.checkpoint && s.checkpoint.id !== checkpoint.id), 'workflow did not advance');
+      }
+      assert.equal(state.summary.completed, total);
+      assert.equal(f.requests.length, calls);
+      const messages = state.conversation.messages;
+      if (workflow === 'graph' || workflow === 'handoff') {
+        assert.equal(messages[1].control.skipped, false);
+        assert.equal(messages[2].control.skipped, true);
+        assert.equal(messages[1].control.fallback, false);
+      }
+      if (workflow === 'approval') assert.equal(messages[1].control.value, 'approved');
+      if (workflow === 'loop') {
+        assert.match(messages[2].text, /Local inspect_context tool/);
+        assert.equal(messages[4].control.skipped, true);
+      }
+      if (workflow === 'hybrid') assert.equal(messages[6].control.skipped, true);
+      const originals = await savedFiles(state.run, messages.map(message => message.task_id));
+      f.available = false;
+      const tags = f.tags;
+      assert.equal((await f.post('resume')).status, 202);
+      state = await until(f.state, s => s.phase === 'finished', 'offline replay did not finish');
+      assert.equal(state.summary.model_calls_now, 0);
+      assert.equal(state.summary.completed_now, 0);
+      assert.equal(f.tags, tags);
+      await assertPreserved(originals);
+    });
+  }
+});
+
+test('human rejection durably suppresses every local action and malformed routes use a conservative fallback', enabled, async t => {
+  for (const workflow of ['approval', 'graph']) {
+    await t.test(workflow, async t => {
+      const f = await fixture(t, { storySceneMs: 60000, reply: () => 'Ambiguous prose, not a control line.' });
+      let state = await startPaused(f, { workflow: `conversation.${workflow}`, rounds: 1 });
+      while (state.phase !== 'finished') {
+        const checkpoint = state.checkpoint;
+        const response = checkpoint.stage === 'approval'
+          ? await f.post('action', { action: 'reject', checkpoint: checkpoint.id })
+          : await f.post('next', { checkpoint: checkpoint.id });
+        assert.equal(response.status, 202);
+        state = await until(f.state, s => s.phase === 'finished' || (s.checkpoint && s.checkpoint.id !== checkpoint.id), 'workflow did not advance');
+      }
+      if (workflow === 'approval') {
+        assert.equal(f.requests.length, 1);
+        assert.equal(state.conversation.messages[1].control.value, 'rejected');
+        assert(state.conversation.messages.slice(2).every(message => message.control.skipped));
+      } else {
+        assert.equal(f.requests.length, 3);
+        assert.equal(state.conversation.messages[1].control.value, 'B');
+        assert.equal(state.conversation.messages[1].control.fallback, true);
+        assert.equal(state.conversation.messages[1].control.skipped, true);
+        assert.equal(state.conversation.messages[2].control.skipped, false);
+      }
+    });
+  }
+});
 
 test('a real Rust conversation preserves causal messages through automatic crash, recovery and an offline zero-call replay', enabled, async t => {
   const f = await fixture(t);

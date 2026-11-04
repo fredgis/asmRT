@@ -1,6 +1,6 @@
 # Agent workflow types
 
-A workflow type names an orchestration contract, not a task handler or a model. asmRT implements **Workflow 1: sequential conversation** and **Workflow 2: discussion**. See the [architecture reference](ARCHITECTURE.md) for process boundaries, native records, and recovery details, and the [glossary](../CONTEXT.md) for terminology.
+A workflow type names an orchestration contract, not a task handler or a model. asmRT implements **eight bounded workflow types**. See the [architecture reference](ARCHITECTURE.md) for process boundaries, native records, and recovery details, and the [glossary](../CONTEXT.md) for terminology.
 
 ## Type registry
 
@@ -8,6 +8,12 @@ A workflow type names an orchestration contract, not a task handler or a model. 
 | --- | --- | --- | --- | --- |
 | 1 | `conversation.sequential` | `1` | Implemented | Fixed-order agent turns over a shared committed conversation prefix, repeated for a fixed number of rounds. |
 | 2 | `conversation.discussion` | `1` | Implemented | Planner seed, concurrent Builder/Critic/Editor debate waves, committed fan-in, final Editor decision. |
+| 3 | `conversation.graph` | `1` | Implemented | A committed routing decision selects a conditional branch, followed by a result. |
+| 4 | `conversation.roles` | `1` | Implemented | Manager brief, specialist delegation and synthesis. |
+| 5 | `conversation.approval` | `1` | Implemented | Validation, explicit durable human decision, local actions or recorded skips. |
+| 6 | `conversation.handoff` | `1` | Implemented | Triage, selected specialist, return to coordinator. |
+| 7 | `conversation.hybrid` | `1` | Implemented | Ordered work and parallel specialists followed by a merge. |
+| 8 | `conversation.loop` | `1` | Implemented | Bounded planning, action and verification with saved feedback. |
 
 The existing **storage demo** (`demo` CLI command) is a deterministic concurrent runtime exercise, not another registered agent workflow type.
 
@@ -96,11 +102,51 @@ The automatic two-round demo deliberately stops Rust after claiming jobs 5/6/7, 
 
 Unsupported kinds, versions or dependency topologies are rejected. The publication/commit distinction, possible repeated inference before publication, and `Runtime::open` ordering caveat described above also apply here.
 
+## Workflows 3–8: control and delegation
+
+All use saved dependency IDs and the same native claim/publish/commit lifecycle. With `r` saved rounds (1–3, default 2), graph and handoff contain **4 jobs**, roles and approval **5**, hybrid **2r + 5**, and loop **3r + 2**. Counts include local control results and skipped branches, not just model calls.
+
+### 3. Conditional graph
+
+The router's committed reply chooses A or B using a standalone `ROUTE=A` or `ROUTE=B` marker. Missing or invalid routing output falls back to **B**. Only the selected branch performs model work; the other publishes an explicit skipped result. A final job joins the saved results.
+
+### 4. Role-based team
+
+Job 1 is the manager's brief. Researcher (2) and analyst (3) run in parallel, each reading `[1]`. Writer (4) reads `[1,2,3]`; the manager's review (5) reads `[1,2,3,4]`. This is delegated work with a review, not a repeated debate wave.
+
+### 5. Human approval
+
+The order is **validator → human decision → simulated receipt → report → notification draft**. Each job reads all predecessors. The human step blocks at checkpoint stage `approval`, including after a restart if no valid decision has been published.
+
+The console sends `POST /api/action` with `{"action":"approve","checkpoint":"<current checkpoint ID>"}` or `action: "reject"`. Generic Next and automatic playback cannot release this gate. The ID binds the command to that exact checkpoint, not a later prompt.
+
+Approval authorizes only local demo artifacts, not real charges or sent messages. Rejection skips receipt, report and notification jobs; it does not contact an escalation service. The decision is saved and reused on replay; an already published valid decision is not requested again.
+
+For all six new types, the automatic browser story crashes at task 3's first claimed checkpoint (the whole claimed batch for parallel work). In approval, this is after the human decision is committed and before a receipt or skip artifact is produced. Recovery retries the interrupted claim without asking for the same saved decision again. The CLI does not inject this demonstration crash.
+
+### 6. Agent handoff
+
+A committed triage result chooses a specialist with `ROUTE=BILLING` or `ROUTE=SUPPORT`. Invalid or missing markers fall back to **SUPPORT**. The selected specialist receives the saved context; the other path records a skip, and the result returns to the coordinator. “Billing” is a specialist role, not a payment integration.
+
+### 7. Hybrid orchestration
+
+A root brief releases researcher and analyst in parallel; a writer merges their results. This is followed by `r` ordered Builder-refinement / Critic-verification pairs, then a final Editor synthesis. After the two parallel specialists, every job reads all preceding jobs. It combines fan-out/fan-in with bounded iterative refinement.
+
+### 8. Agent loop
+
+Gather context, then run up to `r` **plan → local action → verify** cycles before final synthesis. The local action counts and hashes committed context; it does not execute arbitrary commands. A standalone verification marker `RESULT=DONE` skips remaining iterations; `RESULT=RETRY` continues within the budget. Missing or invalid markers mean **RETRY**, never an unbounded loop. Final synthesis still runs.
+
+### Saved control evidence
+
+Control results extend reply JSON with `control: {kind, value, source_task_id, source_sha256, fallback?, skipped?}`. The source hash binds a decision to its committed input. Skipped branches produce completed local artifacts with explicit skipped text and zero generated tokens; they are not invented model replies or unfinished jobs.
+
+Replay recomputes the expected control result and validates its text, zero-token local output, dependency hashes and native artifact commitment. A changed decision source or inconsistent skipped result stops recovery rather than silently rerouting. Existing envelopes remain `asmrt.chat.reply.v1`; definitions retain `llm.chat.turn` v3, with the saved workflow contract dispatching the local/control steps.
+
 ## Selecting a workflow
 
-The console offers compact diagrammed choices before **Start conversation**. `POST /api/conversation` accepts `workflow: "conversation.sequential"` or `workflow: "conversation.discussion"`; omission defaults to sequential. A selected run retains its workflow across controller restarts.
+The console's **8 workflows** picker offers diagrammed choices before **Start conversation**. `POST /api/conversation` accepts any canonical kind in the registry above; omission defaults to sequential. A selected run retains its workflow across controller restarts.
 
-The CLI accepts `chat --workflow sequential` or `chat --workflow discussion`. Omission means sequential for a new plan and preserves the saved workflow for an existing plan. An explicit conflicting selection is rejected rather than rewriting saved work.
+The CLI accepts `chat --workflow sequential|discussion|graph|roles|approval|handoff|hybrid|loop`. Omission means sequential for a new plan and preserves the saved workflow for an existing plan. An explicit conflicting selection is rejected rather than rewriting saved work.
 
 The playful **Overview** and professional **Details** present the same run. Browsing a saved reply or switching views does not schedule an agent or alter the workflow. Overview's committed-memory checks come from native record observations, not merely from reply files.
 
@@ -110,7 +156,7 @@ The playful **Overview** and professional **Details** present the same run. Brow
 
 | Namespace | Meaning |
 | --- | --- |
-| `workflow.kind` + `workflow.version` | Agent orchestration contract: `conversation.sequential` v1 or `conversation.discussion` v1. |
+| `workflow.kind` + `workflow.version` | One of the eight registered agent orchestration contracts, currently v1. |
 | Job `kind` + `version` | Task/request handler: `llm.chat.turn` v1, v2, or v3; new jobs still use v3. These are **not workflow versions**. |
 | `asmrt.conversation.v1`, `asmrt.task.v1`, `asmrt.chat.reply.v1` | JSON envelope/schema identifiers, unchanged by this descriptor. |
 | Native record codec version | Independent coordination-record encoding, unchanged. |
@@ -123,8 +169,8 @@ The browser snapshot persists the canonical string in `run.workflow` and exposes
 
 Compatibility means the updated reader accepts legacy plans; pre-descriptor binaries reject the new field under their strict schema validation. Do not edit saved plans to downgrade them.
 
-## Future type boundaries
+## Type boundaries
 
-Conditional routing, arbitrary branching graphs and unbounded discussions are future possibilities, not registered kinds or accepted configuration. A future type needs its own explicit ordering, input, completion and recovery contract. Workflow 2's fixed parallel debate does not imply support for arbitrary DAG configuration.
+The catalog implements concrete local workflows, not arbitrary user-authored graphs, dynamic code execution or unbounded agent teams. Conditional routing does not imply a general graph language. Every new type needs explicit ordering, input, completion and recovery rules.
 
 Implementation: [`Plan::prepare`, `Plan::validate`, `request`, and `run` in `src/chat.rs`](../src/chat.rs).

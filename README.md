@@ -14,11 +14,22 @@ When a process stops, asmRT resumes unfinished work without regenerating validat
 
 ![Overview: four agents, an actual saved reply and graphical asmDB memory](Docs/assets/screenshots/conversation.png)
 
+## Tiny runtime, explicit footprint
+
+**2.66 MiB for the native runtime executable**, including the eight workflow contracts, CLI, task coordination and local-model HTTP client.
+
+| Measured artifact | Size |
+| --- | ---: |
+| `asmrt.exe` · release, Windows x86-64 GNU | **2,785,792 bytes** |
+| Same executable, binary units | **2,720.5 KiB / 2.66 MiB** |
+
+Measured on 2026-11-04 with `cargo build --locked --release`: symbols stripped, thin LTO, one code-generation unit, normal release optimization. This is **the executable's disk size, not its RAM use or the total installation**. It excludes the HTML/CSS/JavaScript demo and Node controller, asmDB and its MCP bridge, the model server and weights, runtime data, and build tools. Those components remain required for the corresponding features.
+
 ## What actually runs
 
 Rust uses **asmDB's existing MCP/stdio bridge** to read and update durable task state. The assembly engine stays unchanged. Full instructions and replies live in files alongside the database.
 
-The demo calls **`qwen3.5:0.8b` through local Ollama**. One model serves four roles: Planner, Builder, Critic and Editor. Replies are generated, not scripted; no cloud API key is required. The small model can make mistakes. The demonstration is about recovering work, not proving the quality of its dinner advice.
+The demo calls **`qwen3.5:0.8b` through local Ollama**. One model serves four roles: Planner, Builder, Critic and Editor. Model replies are generated, not scripted; human decisions, skipped paths and local tool results are separately labeled runtime artifacts. No cloud API key is required. The small model can make mistakes. The demonstration is about recovering work, not proving the quality of its dinner advice.
 
 ```mermaid
 flowchart LR
@@ -42,9 +53,9 @@ flowchart LR
 
 ## See recovery happen
 
-The agents plan pizza night for eight friends on $40. With the default two rounds, the controller kills Rust after four committed replies, before the next model calls, then restarts it.
+The agents plan pizza night for eight friends on $40. Choose how they coordinate: a relay, parallel discussion, conditional routing, specialist delegation, a human gate, a handoff, a hybrid plan or a bounded feedback loop.
 
-Replies 1–4 survive. Workflow 1 retries one claimed turn; Workflow 2 retries a three-agent debate wave. A final replay reports `completed_now = 0` and `model_calls_now = 0`: completed work did not run again.
+The controller injects a real process crash at a workflow checkpoint, then restarts Rust. Committed replies survive; unfinished claims are retried. A final replay reports `completed_now = 0` and `model_calls_now = 0`: completed work did not run again. The human-gated workflow waits for your decision instead of silently approving it.
 
 **Overview** keeps the story playful: large robots, the full conversation colored by agent, and visual memory. Memory tiles jump to a reply; **Latest reply** returns to the end of the conversation. A check means the native database reported completion, not merely that a reply file exists.
 
@@ -60,40 +71,140 @@ ollama pull qwen3.5:0.8b
 & .\scripts\visualize.ps1 -AsmdbDir "$HOME\repo-asmdb"
 ```
 
-Open **http://127.0.0.1:8787**, choose **Workflow 1 · Sequential** or **Workflow 2 · Discussion** using the little diagrams, then click **Start conversation**. The same button pauses and resumes. Keep the controller terminal open.
+Open **http://127.0.0.1:8787**, open the **8 workflows** picker, choose a diagrammed workflow, then click **Start conversation**. The same button pauses and resumes. For **Human approval**, read the proposal and explicitly approve or reject it. Keep the controller terminal open.
 
 **Reset demo** stops the runtime and clears the view after confirmation. It preserves old run folders and waits for you to start a fresh run. To change the mission, reset, edit it in Details, then start. Refreshing or switching views does not restart the conversation. Pause holds future steps; an inference already running finishes at its next checkpoint.
 
-## Workflow 1: sequential conversation
+## Eight ways to coordinate
 
-`conversation.sequential`, version `1`:
+All eight use the same runtime, asmDB state and immutable context. These are executable, bounded workflow contracts, not just diagram presets. The four colored identities remain recognizable; their saved instructions define the specialist work.
 
-```text
-Planner → Builder → Critic → Editor
-          two rounds by default
+![Eight diagrammed workflow choices in the same two-tab console](Docs/assets/screenshots/workflows.png)
+
+| # | Workflow | What happens | Useful for |
+| --- | --- | --- | --- |
+| 1 | **Relay** | Planner → Builder → Critic → Editor, one turn at a time. Each reads all earlier committed replies. | Ordered drafting and review. |
+| 2 | **Discussion** | A seed opens parallel debate waves; a final synthesis reconciles the saved replies. | Comparing proposals and objections. |
+| 3 | **Conditional graph** | A committed decision selects a path before the result is finalized. | Different handling for different cases. |
+| 4 | **Role-based team** | A manager briefs specialists; their results feed a final synthesis. | Dividing a goal by expertise. |
+| 5 | **Human approval** | Validate, wait for a person, then perform or skip local actions according to the saved decision. | Keeping a human in control. |
+| 6 | **Agent handoff** | Triage routes context to a specialist, whose answer returns to the coordinator. | Passing responsibility without losing context. |
+| 7 | **Hybrid orchestration** | A root agent combines ordered steps and parallel specialists, then merges their work. | Mixing dependencies and independent tasks. |
+| 8 | **Agent loop** | Gather context, plan, act and verify within a fixed iteration budget. | Revising a result with feedback. |
+
+Parallel requests can still be queued by the model server. None of these patterns promises faster inference or exactly-once external effects. [Exact contracts, decision rules and recovery boundaries →](Docs/WORKFLOWS.md)
+
+<details>
+<summary><strong>Explore the workflow diagrams</strong></summary>
+
+### Relay & discussion
+
+```mermaid
+flowchart LR
+    subgraph Relay
+      P[Planner] --> B[Builder] --> C[Critic] --> E[Editor]
+    end
+    subgraph Discussion
+      S[Seed] --> B2[Builder] & C2[Critic] & E2[Editor]
+      B2 & C2 & E2 --> F[Synthesis]
+    end
+    classDef cyan fill:#e4f7fb,stroke:#1593ae,color:#124e5d
+    classDef mint fill:#eaf7ef,stroke:#68a57e,color:#28563a
+    classDef orange fill:#fff0e8,stroke:#e8793e,color:#733516
+    classDef purple fill:#f3f1fa,stroke:#9582bc,color:#46376c
+    class P,S cyan
+    class B,B2 mint
+    class C,C2 orange
+    class E,E2,F purple
 ```
 
-Rust supplies each turn with **all earlier committed replies** and runs one model call at a time. It saves and commits the reply before advancing. The agents do not poll a message bus; the runtime provides their context. The browser controller only paces the demo.
+### Conditional graph & role-based team
 
-## Workflow 2: discussion
-
-`conversation.discussion`, version `1`:
-
-```text
-Planner's idea
-     ├── Builder ──┐
-     ├── Critic  ──┼── shared debate → Editor's decision
-     └── Editor  ──┘
-       two debate rounds by default
+```mermaid
+flowchart LR
+    subgraph Conditional["Conditional graph"]
+      I[Context] --> R{Route}
+      R -->|Path A| A[Specialist A]
+      R -->|Path B| B[Specialist B]
+      A & B --> O[Result]
+    end
+    subgraph Team["Role-based team"]
+      M[Manager] --> S1[Specialist 1] & S2[Specialist 2]
+      S1 & S2 --> W[Writer] --> MR[Manager review]
+    end
+    classDef cyan fill:#e4f7fb,stroke:#1593ae,color:#124e5d
+    classDef mint fill:#eaf7ef,stroke:#68a57e,color:#28563a
+    classDef orange fill:#fff0e8,stroke:#e8793e,color:#733516
+    classDef purple fill:#f3f1fa,stroke:#9582bc,color:#46376c
+    class I,M,MR cyan
+    class A,S1 mint
+    class R,B,S2 orange
+    class O,W purple
 ```
 
-Builder, Critic and Editor **reply concurrently**, using the same committed history. The next round confronts their proposals and objections; a final Editor turn produces the result. Each wave waits for its required replies to be committed. A restart preserves completed branches and resumes only unfinished work.
+### Human approval & agent handoff
 
-Rust starts three model requests together; **Ollama may queue their actual token generation**. This is a bounded discussion, not an endless free-form swarm. [Read both workflow contracts](Docs/WORKFLOWS.md).
+```mermaid
+flowchart LR
+    subgraph Human["Human approval"]
+      V[Validate] --> H{Human decision}
+      H -->|Approve| X[Continue]
+      H -->|Reject| Q[Skip actions]
+      X --> N[Report and notification draft]
+      N & Q --> Z[End]
+    end
+    subgraph Handoff["Agent handoff"]
+      T[Triage] --> D{Delegate}
+      D --> A[Specialist A]
+      D --> B[Specialist B]
+      A & B --> R[Return result]
+    end
+    classDef cyan fill:#e4f7fb,stroke:#1593ae,color:#124e5d
+    classDef mint fill:#eaf7ef,stroke:#68a57e,color:#28563a
+    classDef orange fill:#fff0e8,stroke:#e8793e,color:#733516
+    classDef purple fill:#f3f1fa,stroke:#9582bc,color:#46376c
+    class V,T cyan
+    class X,A mint
+    class H,Q,D,B orange
+    class N,R,Z purple
+```
+
+### Hybrid orchestration & agent loop
+
+```mermaid
+flowchart LR
+    subgraph Hybrid["Hybrid orchestration"]
+      R[Manager brief] --> A[Researcher] & B[Analyst]
+      A & B --> M[Writer merge]
+      M --> F[Refine] --> Q[Verify]
+      Q -->|Bounded rounds| F
+      Q --> S[Synthesis]
+    end
+    subgraph Loop["Bounded agent loop"]
+      C[Gather context] --> L[Plan] --> T[Act] --> V{Verify}
+      V -->|Improve, within budget| L
+      V -->|Done or limit reached| O[Result]
+    end
+    classDef cyan fill:#e4f7fb,stroke:#1593ae,color:#124e5d
+    classDef mint fill:#eaf7ef,stroke:#68a57e,color:#28563a
+    classDef orange fill:#fff0e8,stroke:#e8793e,color:#733516
+    classDef purple fill:#f3f1fa,stroke:#9582bc,color:#46376c
+    class R,C,L cyan
+    class A,T mint
+    class B,V,Q orange
+    class M,O,S purple
+    class F mint
+```
+
+These diagrams show control flow. Branches converge after the selected path; they do not imply both alternatives perform model work. Run-specific jobs and dependency IDs remain inspectable in Details.
+
+</details>
+
+![Explicit human decision: automatic playback cannot approve the saved proposal](Docs/assets/screenshots/approval.png)
 
 ## Product direction
 
-asmRT's core is durable coordination, not the chat interface. Next: longer-running agent jobs, additional model and tool handlers, conditional workflows and framework integrations. Each extension needs explicit rules for context, completion and recovery.
+asmRT's core is durable coordination, not the chat interface. Next: longer-running agent jobs, additional model and tool handlers, user-defined graphs and integrations. Each extension needs explicit rules for context, completion and recovery.
 
 The runtime recovers known jobs in one local coordinator. A valid saved reply can be reused; inference lost before publication may run again. It does not promise exactly-once external effects, distributed orchestration or faster LLM inference. FFI and a CDC follower are not shipped.
 

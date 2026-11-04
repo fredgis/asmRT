@@ -1,7 +1,8 @@
 // Validates conversation observations and derives workflow and native-memory views without inventing runtime state.
 
 export function isConversationWorkflow(kind) {
-  return ['conversation.sequential', 'conversation.discussion'].includes(kind);
+  return ['sequential', 'discussion', 'graph', 'roles', 'approval', 'handoff', 'hybrid', 'loop']
+    .some(name => kind === `conversation.${name}`);
 }
 
 export function conversationWorkflow(snapshot, run) {

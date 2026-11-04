@@ -118,6 +118,9 @@ test('snapshot validation accepts legacy relay and additive discussion metadata'
   assert.equal(validConversation({ ...legacyConversation, workflow: { kind: 'conversation.sequential', version: 1 } }), true);
   assert.equal(validConversation({ ...legacyConversation, workflow: { kind: 'conversation.discussion', version: 1 }, turns: discussionTurns, active: debate[0], active_turns: debate }), true);
   assert.equal(validConversation({ ...legacyConversation, active: debate[0], active_turns: [] }), true);
+  for (const kind of ['graph', 'roles', 'approval', 'handoff', 'hybrid', 'loop']) {
+    assert.equal(validConversation({ ...legacyConversation, workflow: { kind: `conversation.${kind}`, version: 1 }, turns: discussionTurns }), true);
+  }
 });
 
 test('snapshot validation rejects malformed workflow, dependency and concurrent-turn metadata', () => {
