@@ -1,4 +1,9 @@
-//! Serializes task operations through one state actor and reconciles interrupted work on reopen.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: runtime.rs -- single-writer state actor                     |
+//! +--------------------------------------------------------------------+
+//! Serializes claims and completions over one MCP connection. The cache
+//! follows acknowledged writes, never leads them. Reopening validates all
+//! records, then requeues interrupted claims before accepting new work.
 
 use std::{collections::BTreeMap, fs, io::Write, path::PathBuf, time::Duration};
 
@@ -113,6 +118,8 @@ enum Operation {
 }
 
 impl Runtime {
+    /// Opens the writer and performs recovery; this is not a read-only operation.
+    /// Running tasks become pending, while completed tasks remain committed.
     pub async fn open(config: Config) -> Result<Self> {
         let config = config.prepare()?;
         let mut mcp = Mcp::open(&config).await?;
@@ -123,7 +130,8 @@ impl Runtime {
                 return Err(error);
             }
         };
-        // Validate the complete scan before mutating any recovered task.
+        // The complete scan has passed validation. Requeue without resetting attempts:
+        // the next claim increments the counter and fences workers from the old process.
         for task in tasks
             .values_mut()
             .filter(|task| task.state() == TaskState::Running)
@@ -160,6 +168,8 @@ impl Runtime {
 impl StateHandle {
     async fn request(&self, operation: Operation) -> Result<Option<Task>> {
         let (reply, response) = oneshot::channel();
+        // Once accepted into the mailbox, a write may finish even if its caller
+        // drops the response future. Cancellation is not a storage rollback.
         self.sender
             .send(Request::Task { operation, reply })
             .await
@@ -173,6 +183,8 @@ impl StateHandle {
             .ok_or_else(|| Error::Transport("enqueue returned no task".into()))
     }
 
+    /// Reuses an existing task only when its immutable definition still matches.
+    /// Callers must publish the referenced definition before enqueueing it.
     pub async fn enqueue_defined(&self, id: u64, definition: DefinitionRef) -> Result<Task> {
         self.request(Operation::Enqueue(Task::defined(id, definition)?))
             .await?
@@ -186,11 +198,15 @@ impl StateHandle {
         self.request(Operation::Get(id)).await
     }
 
+    /// Persists a claim on the lowest pending ID before returning it.
+    /// Dependency readiness is the caller's responsibility, not the actor's.
     pub async fn claim_next(&self, owner: &str) -> Result<Option<Task>> {
         validate_owner(owner)?;
         self.request(Operation::Claim(owner.into())).await
     }
 
+    /// Commits an artifact reference using the claim's owner/attempt fence.
+    /// The caller must publish and validate the artifact first; no file is read here.
     pub async fn complete(&self, claim: &Task, artifact: &str) -> Result<Task> {
         self.request(Operation::Complete(claim.completed(artifact)?))
             .await?
@@ -308,6 +324,7 @@ async fn execute(
                 ));
             }
             if current == &proposed {
+                // An identical completion is idempotent; a different result is a conflict.
                 return Ok(Some(current.clone()));
             }
             if current.state() != TaskState::Running {

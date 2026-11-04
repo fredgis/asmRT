@@ -1,4 +1,9 @@
-// Renders the local demo, preserving saved transcripts while workflow controls dispatch explicit controller commands.
+// +--------------------------------------------------------------------+
+// | asmRT :: app.js -- browser observation and interaction layer        |
+// +--------------------------------------------------------------------+
+// Renders Overview and Details from validated controller snapshots.
+// Saved transcripts stay bound to their run; next-run graph previews are
+// presentation only. Explicit HTTP commands drive the native controller.
 import { nativeRecordFields, conversationChapter, conversationMemory, conversationWorkflow, conversationActiveTurns, isConversationWorkflow, validConversation } from "/console-view.mjs";
 import { WORKFLOWS, workflowInfo, workflowSVG, workflowTurnCount, graphSVG, workflowNodeStates } from "/workflow-catalog.mjs";
 
@@ -138,6 +143,8 @@ byId("workflow-options").innerHTML = WORKFLOWS.map(workflow =>
   <span class="workflow-mini">${workflowSVG(workflow)}</span></span><span class="workflow-caption">${workflow.caption}</span></span></label>`).join("");
 const workflowChoices = [...document.querySelectorAll('input[name="workflow"]')];
 let selectedWorkflow = "conversation.sequential";
+// Preview state belongs only to the right-side diagram. Never relabel the saved
+// transcript or carry its committed nodes into a different topology before Start.
 let previewWorkflow = false;
 let detailMode = "overview";
 const DEFAULT_TOPIC = "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";

@@ -1,4 +1,9 @@
-//! Real-asmDB integration tests for actor serialization, persistence, and recovery.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: tests/runtime.rs -- real single-writer integration checks   |
+//! +--------------------------------------------------------------------+
+//! Uses a built asmDB checkout and isolated task directories to exercise
+//! actor serialization, persistence, stale claims and recovery. External
+//! engine tests are opt-in; they do not operate on the user's demo state.
 
 use std::path::PathBuf;
 

@@ -1,4 +1,9 @@
-// Project acknowledged deterministic-demo state into scene copy, controls, and pacing.
+// +--------------------------------------------------------------------+
+// | asmRT :: story.mjs -- deterministic storage-story presentation       |
+// +--------------------------------------------------------------------+
+// Projects acknowledged task state into scene copy, controls and pacing.
+// Publication, native commitment, recovery and zero-work replay remain
+// separate observations; a scene never creates or completes a task.
 
 // The catalog follows publication and completion separately, then recovery and zero-work replay.
 const scenes = [

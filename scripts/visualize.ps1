@@ -1,4 +1,9 @@
-# Launch the local visualizer against an existing asmDB checkout and dedicated demo state.
+# +--------------------------------------------------------------------+
+# | asmRT :: visualize.ps1 -- local demo launcher                       |
+# +--------------------------------------------------------------------+
+# Resolve an existing asmDB checkout, optionally build Rust, then start
+# the Node controller with a dedicated data root. SkipBuild intentionally
+# reuses the existing binary; a requested build must succeed before launch.
 
 [CmdletBinding()]
 param(

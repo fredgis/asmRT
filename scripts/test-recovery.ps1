@@ -1,4 +1,9 @@
-# Exercise crash recovery at durable boundaries using this invocation's owned process tree.
+# +--------------------------------------------------------------------+
+# | asmRT :: test-recovery.ps1 -- Windows crash-boundary checks          |
+# +--------------------------------------------------------------------+
+# Interrupt only this invocation's owned process tree after observing a
+# durable boundary. Isolated storage and PID/start-time identities keep
+# fault injection and cleanup away from unrelated demos and processes.
 #requires -Version 7.0
 param(
     [string]$AsmdbDir = $env:ASMRT_ASMDB_REPO,

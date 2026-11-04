@@ -1,4 +1,9 @@
-// Validates conversation observations and derives workflow and native-memory views without inventing runtime state.
+// +--------------------------------------------------------------------+
+// | asmRT :: console-view.mjs -- pure observation-to-view helpers        |
+// +--------------------------------------------------------------------+
+// Validates conversation snapshots and decodes readable memory fields.
+// Unknown records remain inspectable; a reply file alone never earns a
+// native-commit checkmark. No process, network or storage mutations here.
 
 export function isConversationWorkflow(kind) {
   return ['sequential', 'discussion', 'graph', 'roles', 'approval', 'handoff', 'hybrid', 'loop']

@@ -217,3 +217,19 @@ Back up the whole run directory, including the database, instructions and reply 
 Bug reports, recovery tests and focused improvements are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and pull requests.
 
 asmRT is licensed under **[MIT](LICENSE)**. asmDB, model weights and other dependencies retain their own licenses.
+
+## Adapting the demo to your own context
+
+Pizza night is a sample mission, not a requirement of the runtime. You can reuse the implemented workflow patterns for other topics, such as support, analysis or drafting. Changing the mission does not change the workflow's structure.
+
+| What you want to change | Current support |
+| --- | --- |
+| **The mission** | Already configurable: enter another topic before Start. |
+| **Agent names and instructions** | Saved in the plan, but currently initialized from predefined values. Exposing custom names and instructions requires a small configuration extension, not a new persistence engine. Internal agent IDs and the four-role structure remain fixed. |
+| **The local LLM** | Already configurable at launch: choose an installed Ollama model. All four agents currently share one model configuration. |
+| **A remote LLM provider or a different model per agent** | Requires code changes; neither is currently supported. |
+| **Steps, dependencies and routing rules** | The eight workflow structures are implemented in code. Arbitrary user-defined graphs are not yet configurable. |
+
+These patterns are reusable, but they are not yet a general-purpose no-code workflow builder. Real business actions also need integrations: the approval demo creates or skips local artifacts; it does not charge a payment or send a notification.
+
+**Start a new conversation when changing settings.** A saved run keeps its original topic, agent instructions, model identity and job definitions so recovery can validate and reuse completed work. Do not edit an existing run's saved files to repurpose it.

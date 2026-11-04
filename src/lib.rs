@@ -1,4 +1,9 @@
-//! Public task and state-actor API for durable coordination through the asmDB MCP bridge.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: lib.rs -- public runtime API                               |
+//! +--------------------------------------------------------------------+
+//! Tasks and state handles coordinate durable work through the asmDB MCP
+//! bridge. Storage belongs to one actor; model calls and artifact files
+//! belong to the application, not this library.
 
 #![forbid(unsafe_code)]
 
@@ -9,6 +14,8 @@ mod runtime;
 pub use model::{DefinitionRef, Record, Task, TaskState};
 pub use runtime::{Config, Runtime, StateHandle};
 
+/// A transport failure can leave a write's outcome unknown. Reopen and
+/// reconcile persisted state instead of blindly retrying the same operation.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid input or task record: {0}")]

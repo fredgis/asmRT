@@ -1,5 +1,9 @@
-// Exercises real Rust/MCP persistence and browser controls with an explicitly test-only HTTP model.
-// Saved bytes, causal context and request gates distinguish recovery from fresh or sequential inference.
+// +--------------------------------------------------------------------+
+// | asmRT :: conversation.test.mjs -- durable workflow integration       |
+// +--------------------------------------------------------------------+
+// Exercises Rust/MCP and controller commands with a test-only HTTP model.
+// Saved bytes, causal context and request gates distinguish reuse from
+// fresh inference. Native cases require an explicit asmDB checkout.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';

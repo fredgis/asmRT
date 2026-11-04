@@ -1,5 +1,9 @@
-// Verifies the local controller's real process lifecycle, checkpoint pacing and safe browser commands.
-// Each fixture owns an isolated run directory and cleans up its writer before removing files.
+// +--------------------------------------------------------------------+
+// | asmRT :: server.test.mjs -- local controller lifecycle checks        |
+// +--------------------------------------------------------------------+
+// Exercises process ownership, checkpoint pacing and browser commands.
+// Fixtures own isolated run directories and close their writers before
+// cleanup; no test should borrow the active user demo's storage.
 import assert from 'node:assert/strict';
 import { ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';

@@ -1,4 +1,9 @@
-//! Owns the asmDB bridge process and validates its bounded, newline-delimited MCP exchanges.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: mcp.rs -- owned bridge and bounded transport                |
+//! +--------------------------------------------------------------------+
+//! Starts one Node MCP bridge and validates newline-delimited JSON-RPC,
+//! embedded asmDB results, and paginated startup records. A failed or
+//! timed-out write has an unknown outcome: recovery, not retry, resolves it.
 
 use std::{collections::BTreeMap, process::Stdio, time::Duration};
 
@@ -108,6 +113,8 @@ impl Mcp {
 
     // One in-flight request gets a single deadline; reject unrelated replies and unbounded output.
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+        // Unlike task IDs (decimal strings), JSON-RPC IDs are JSON numbers and
+        // must fit the bridge's exact JavaScript integer range.
         self.next_id = self
             .next_id
             .checked_add(1)
@@ -115,6 +122,8 @@ impl Mcp {
             .ok_or_else(|| transport("request ID exhausted"))?;
         let id = self.next_id;
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        // The deadline covers writing and reading together. There is deliberately
+        // no automatic resend: asmDB may have applied a write before stdout failed.
         timeout(self.request_timeout, async {
             self.write_message(&message).await?;
             for _ in 0..64 {

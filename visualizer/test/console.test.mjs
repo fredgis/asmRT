@@ -1,4 +1,9 @@
-// Verifies backward-compatible conversation metadata and honest, lossless native-memory presentation.
+// +--------------------------------------------------------------------+
+// | asmRT :: console.test.mjs -- pure view and graph contracts           |
+// +--------------------------------------------------------------------+
+// Checks legacy metadata, native-memory evidence and graph aggregation.
+// Retained claims must not look live, and saved replies must not look
+// committed. No browser, model service or native writer is required.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { nativeRecordFields, conversationChapter, conversationMemory, conversationWorkflow, conversationActiveTurns, isConversationWorkflow, validConversation } from '../public/console-view.mjs';

@@ -1,4 +1,11 @@
-/* Styles the native workflow controls, agent overview, complete transcript and detailed runtime console. */
+/*
++----------------------------------------------------------------------+
+| asmRT :: styles.css -- console themes, layout and state presentation  |
++----------------------------------------------------------------------+
+Shared light/dark tokens serve both Overview and Details. Graph colors
+follow data attributes set from observations, not animation timing.
+Responsive layouts and reduced-motion rules preserve the same controls.
+*/
 
 /* Shared light/dark tokens and native control affordances. */
 :root {

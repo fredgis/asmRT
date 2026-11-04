@@ -1,4 +1,9 @@
-//! CLI regressions at real process, local HTTP, and isolated durable-storage boundaries.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: tests/cli.rs -- native command and conversation regressions |
+//! +--------------------------------------------------------------------+
+//! Exercises process output, local HTTP model fixtures and isolated
+//! durable storage. Checks saved replies and recovery behavior rather
+//! than relying on a model's nondeterministic wording.
 
 use std::{
     fs,

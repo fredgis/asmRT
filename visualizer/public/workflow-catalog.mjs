@@ -1,3 +1,10 @@
+// +--------------------------------------------------------------------+
+// | asmRT :: workflow-catalog.mjs -- workflow icons and live graphs      |
+// +--------------------------------------------------------------------+
+// Presentation metadata for the eight native patterns, not an executable
+// graph definition. Compact picker icons and full diagrams have separate
+// geometry so miniature strokes stay legible.
+
 const chain = '<path d="M10 16h44"/><circle cx="6" cy="16" r="4"/><circle cx="23" cy="16" r="4"/><circle cx="41" cy="16" r="4"/><circle cx="58" cy="16" r="4"/>';
 const fork = '<path d="M10 16h8V5h10m-10 11h10m-10 0v11h10M36 5h10v22H36m10-11h8"/><circle cx="6" cy="16" r="4"/><circle cx="32" cy="5" r="4"/><circle cx="32" cy="16" r="4"/><circle cx="32" cy="27" r="4"/><circle cx="58" cy="16" r="4"/>';
 const route = '<path d="M10 16h10m12-4 12-7h10M32 20l12 7h10"/><circle cx="6" cy="16" r="4"/><path d="m20 16 6-7 7 7-7 7Z"/><circle cx="58" cy="5" r="4"/><circle cx="58" cy="27" r="4"/>';
@@ -138,6 +145,8 @@ function stageFor(kind, index, total) {
   }
 }
 
+// A stage may represent several jobs: one committed round is not full completion.
+// Retained observations override every live highlight after disconnection or stop.
 export function workflowNodeStates(kind, { turns = [], cells = [], activeTurns = [], checkpoint, live = false, retained = false } = {}) {
   return graphFor(kind).nodes.map(n => {
     const ids = turns.filter((_, index) => stageFor(kind, index, turns.length) === n.id).map(turn => turn.task_id);

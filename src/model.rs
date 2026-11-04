@@ -1,9 +1,15 @@
-//! Task states, definition references, and the compact versioned asmDB record codec.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: model.rs -- task invariants and record codec                |
+//! +--------------------------------------------------------------------+
+//! Maps typed task states to fixed-size asmDB records. Version 1 stores
+//! plain tasks; version 2 also binds an external definition by SHA-256.
+//! Transition helpers build candidates only; they do not write storage.
 
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+/// Decimal strings keep IDs and attempt counters exact across the JavaScript bridge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
@@ -161,6 +167,8 @@ impl Task {
                 .map(|value| value.reference.clone()),
             definition_sha256: self.definition.as_ref().map(|value| value.sha256.clone()),
         };
+        // Enforce the 175-byte content budget after JSON escaping, not on source
+        // string lengths: quotes and multibyte text also consume record space.
         let content = serde_json::to_string(&payload).map_err(invalid)?;
         check_content(&content)?;
         Ok(Record {
@@ -171,6 +179,7 @@ impl Task {
         })
     }
 
+    /// Rejects malformed or mixed-version records rather than repairing persisted data.
     pub fn decode(record: &Record) -> Result<Self> {
         check_content(&record.content)?;
         let state = match record.tag.as_str() {

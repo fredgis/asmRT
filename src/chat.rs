@@ -1,4 +1,10 @@
-//! Immutable local-model conversations, validated replay, and durable turn orchestration.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: chat.rs -- durable conversation orchestration               |
+//! +--------------------------------------------------------------------+
+//! Expands eight fixed workflow patterns into immutable jobs. Committed
+//! input artifacts define each request; published replies are verified
+//! before reuse. This demo supports one local model, not arbitrary graphs
+//! or external business actions.
 
 use std::{
     collections::BTreeMap,
@@ -304,6 +310,9 @@ fn read_file(filename: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+// Flush a same-directory temporary file before publishing without replacement.
+// Identical bytes are reusable after a crash; conflicting bytes are never overwritten.
+// On Unix, also sync the directory entry after publication.
 fn publish(filename: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = filename.parent().expect("conversation file has a parent");
     ensure_directory(parent)?;
@@ -409,6 +418,8 @@ async fn installed_digest(client: &Client, base_url: &str, name: &str) -> CliRes
     Ok(found.to_owned())
 }
 
+// Customize names, roles and prompts here for NEW runs. Stable IDs are topology
+// keys; changing their meaning also requires updating layout and plan validation.
 fn agents() -> Vec<Agent> {
     [
         ("planner", "Planner", "Be decisive and pick a practical plan"),
@@ -648,6 +659,8 @@ fn choice(saved: &SavedReply, prefix: &str, allowed: &[&str], fallback: &str) ->
     }
 }
 
+// Derive routing/skip decisions only from verified, committed history and record
+// the source hash. Replay can then reject a decision detached from its evidence.
 fn execution_control(
     kind: WorkflowKind,
     job: &Job,
@@ -727,6 +740,8 @@ fn local_reply(
     })
 }
 
+// Skipped branches still publish a deterministic artifact and complete their task.
+// This keeps joins replayable without a model call or an external side effect.
 fn local_result(
     kind: WorkflowKind,
     job: &Job,
@@ -837,6 +852,9 @@ impl Plan {
         self.workflow.clone().unwrap_or_else(Workflow::sequential)
     }
 
+    // This is a supported-topology contract, not a generic graph loader. Keep
+    // turn_layout and the JavaScript observer's conversationTurns in sync when
+    // adding a pattern; older saved request versions must retain their encoding.
     fn validate(&self) -> CliResult<()> {
         let workflow = self.effective_workflow().resolve()?;
         if self.schema != "asmrt.conversation.v1"
@@ -891,6 +909,8 @@ impl Plan {
         Ok(())
     }
 
+    // Saved settings are authoritative. New defaults affect only a fresh run;
+    // reconstructing a missing plan from task states would lose causal identity.
     async fn prepare(
         directory: &Path,
         options: &Options,
@@ -1065,6 +1085,8 @@ fn request(job: &Job, history: &[SavedReply]) -> CliResult<Value> {
     )
 }
 
+// File existence is not enough for reuse. Bind the reply to its exact job,
+// serialized request, model digest and ordered input-file hashes before accepting it.
 fn load_reply(
     directory: &Path,
     job: &Job,
@@ -1301,7 +1323,9 @@ pub(crate) async fn run(
     let mut calls = 0;
     let mut reused = 0;
     let mut completed = 0;
-    // Validation fixes the topology: equal input lists group only the three discussion siblings.
+    // The validated topology groups adjacent jobs with identical inputs into waves.
+    // Siblings see the same committed context, never each other's in-flight replies;
+    // the next wave waits for all required native completions.
     for wave in plan.turns.chunk_by(|a, b| a.input_ids == b.input_ids) {
         let pending: Vec<_> = wave
             .iter()
@@ -1381,6 +1405,9 @@ pub(crate) async fn run(
                         };
                         saved.reply.control = control;
                         saved.sha256 = digest(&serde_json::to_vec(&saved.reply)?);
+                        // Publication precedes native completion. A crash in this gap
+                        // reuses these verified bytes; a crash before publication may
+                        // repeat inference, so this is not exactly-once model execution.
                         publish(
                             &artifact_path(&directory, job.id),
                             &serde_json::to_vec(&saved.reply)?,

@@ -1,4 +1,9 @@
-# Run Cargo from the repository, preferring its local toolchain when installed.
+# +--------------------------------------------------------------------+
+# | asmRT :: cargo.ps1 -- repository-local Cargo entry point             |
+# +--------------------------------------------------------------------+
+# Prefer the local toolchain when present and forward arguments unchanged.
+# Restore the caller's environment/location even on failure; propagate
+# Cargo's exit code so build and validation failures cannot look successful.
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent

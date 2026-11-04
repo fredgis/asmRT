@@ -1,4 +1,9 @@
-//! Exercises task-record round trips, byte limits, and invalid-state rejection.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: tests/codec.rs -- storage-format contract checks            |
+//! +--------------------------------------------------------------------+
+//! Tests round trips, exact integer precision, UTF-8/escaping byte limits
+//! and malformed-state rejection without a running database. Hand-built
+//! records exercise decoder boundaries independently of constructors.
 
 use asmrt::{Record, Task, TaskState};
 

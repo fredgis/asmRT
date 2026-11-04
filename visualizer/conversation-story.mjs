@@ -1,5 +1,9 @@
-// Defines bounded conversation contracts and maps real runtime checkpoints to demo scenes.
-// Story pacing observes execution; it never fabricates replies or decides task dependencies.
+// +--------------------------------------------------------------------+
+// | asmRT :: conversation-story.mjs -- workflow observer and scene copy  |
+// +--------------------------------------------------------------------+
+// Mirrors Rust's fixed topology for validation and maps acknowledged
+// checkpoints to paced demo scenes. Never generates replies, schedules
+// dependencies or turns a human gate into an automatic approval.
 export const DEFAULT_TOPIC = 'Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.';
 export const SEQUENTIAL = 'conversation.sequential';
 export const DISCUSSION = 'conversation.discussion';

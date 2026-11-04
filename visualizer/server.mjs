@@ -1,5 +1,9 @@
-// Owns the local demo's Rust process, validates its events and exposes the browser control interface.
-// All durable state comes from asmDB acknowledgements and immutable job/reply files, not the UI.
+// +--------------------------------------------------------------------+
+// | asmRT :: server.mjs -- local demo controller                        |
+// +--------------------------------------------------------------------+
+// Owns one Rust process, validates its events and serves browser commands.
+// Durable truth comes from asmDB and immutable job/reply files; controller
+// snapshots and scene timers are observations, not a second scheduler.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -364,6 +368,8 @@ export async function createVisualizer({
   }
 
   async function advanceCheckpoint(id, action = 'next') {
+    // The browser's checkpoint ID is fenced to the current launch; the native
+    // sequence then rejects stale stdin commands. Ordinary next cannot approve.
     if (!child?.stdin?.writable || phase !== 'paused' || checkpoint?.id !== id) {
       throw new HttpError(409, 'This checkpoint has changed. Refresh before continuing.');
     }
@@ -448,6 +454,8 @@ export async function createVisualizer({
     }
   }
 
+  // This manifest selects the run to reopen; it is not the immutable native plan
+  // and cannot establish that any task or reply has been committed.
   async function persistRun() {
     const temporary = path.join(dataRoot, `.latest-${randomUUID()}.tmp`);
     const file = await open(temporary, 'wx');

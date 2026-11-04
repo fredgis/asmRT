@@ -1,4 +1,9 @@
-//! CLI entry point for durable demos, chat, status, and JSON lifecycle events.
+//! +--------------------------------------------------------------------+
+//! | asmRT :: main.rs -- native CLI and storage demonstration             |
+//! +--------------------------------------------------------------------+
+//! Owns runtime startup/shutdown and emits JSON lifecycle observations.
+//! Demo workers publish deterministic files before committing references;
+//! numbered stdin checkpoints expose those distinct durability boundaries.
 
 #![forbid(unsafe_code)]
 
