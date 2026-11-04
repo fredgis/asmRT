@@ -2,6 +2,51 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { nativeRecordFields, conversationChapter, conversationMemory, conversationWorkflow, conversationActiveTurns, isConversationWorkflow, validConversation } from '../public/console-view.mjs';
+import { workflowNodeStates, WORKFLOWS } from '../public/workflow-catalog.mjs';
+import { conversationTurns } from '../conversation-story.mjs';
+
+test('workflow graphs map every saved job once, including repeated stages', () => {
+  for (const { kind } of WORKFLOWS) for (const rounds of [1, 2, 3]) {
+    const turns = conversationTurns({ workflow: kind, rounds });
+    const nodes = workflowNodeStates(kind, { turns });
+    assert.deepEqual(nodes.flatMap(node => node.taskIds).sort(), turns.map(turn => turn.task_id).sort());
+    assert.ok(nodes.every(node => node.taskIds.length > 0));
+  }
+});
+
+test('workflow graph highlights concurrent live nodes but never retained claims as active', () => {
+  const kind = 'conversation.discussion';
+  const turns = conversationTurns({ workflow: kind });
+  const options = { turns, live: true, activeTurns: [
+    { ...turns[1], stage: 'generating' }, { ...turns[2], stage: 'assigned' }, { ...turns[3], stage: 'saved' },
+  ] };
+  const nodes = workflowNodeStates(kind, options);
+  assert.deepEqual(nodes.filter(node => node.state === 'active').map(node => node.id), ['builder', 'critic']);
+  assert.equal(nodes.find(node => node.id === 'editor').state, 'saved');
+  for (const override of [{ live: false }, { retained: true }]) {
+    assert.ok(workflowNodeStates(kind, { ...options, ...override }).every(node => node.state !== 'active'));
+  }
+});
+
+test('workflow graph distinguishes human waiting, saved results, committed skips and incomplete rounds', () => {
+  const kind = 'conversation.approval';
+  const turns = conversationTurns({ workflow: kind });
+  const cells = [
+    { id: '1', status: 'saved', message: { committed: true } },
+    { id: '3', status: 'committed', message: { control: { skipped: true } } },
+  ];
+  const nodes = workflowNodeStates(kind, { turns, cells, live: true, checkpoint: { stage: 'approval', task_ids: ['2'] } });
+  assert.equal(nodes[0].state, 'saved');
+  assert.equal(nodes[1].state, 'approval');
+  assert.equal(nodes[2].state, 'skipped');
+  assert.equal(nodes[3].state, 'pending');
+  const relay = 'conversation.sequential';
+  const partial = workflowNodeStates(relay, {
+    turns: conversationTurns({ workflow: relay }), cells: [{ id: '1', status: 'committed' }],
+  })[0];
+  assert.equal(partial.state, 'pending');
+  assert.equal(partial.label, '1/2 committed');
+});
 
 const row = { id: '9007199254740993', value: '2', tag: 'asmrt.v2.completed', content: JSON.stringify({ o: 'planner', d: 'job:5', h: 'a'.repeat(64), r: 'b'.repeat(64) }) };
 

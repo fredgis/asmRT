@@ -57,7 +57,7 @@ The agents plan pizza night for eight friends on $40. Choose how they coordinate
 
 The controller injects a real process crash at a workflow checkpoint, then restarts Rust. Committed replies survive; unfinished claims are retried. A final replay reports `completed_now = 0` and `model_calls_now = 0`: completed work did not run again. The human-gated workflow waits for your decision instead of silently approving it.
 
-**Overview** keeps the story playful: large robots, the full conversation colored by agent, and visual memory. Memory tiles jump to a reply; **Latest reply** returns to the end of the conversation. A check means the native database reported completion, not merely that a reply file exists.
+**Overview** shows a live workflow graph beneath the asmDB memory tiles on the right. Choosing another workflow immediately previews its graph before Start, without changing the saved conversation or its memory. During a run, active nodes light up in their agent's color, including concurrent branches and the human decision gate. Labels distinguish committed, saved, skipped and last-observed steps; repeated rounds share a node. The large robots and full conversation keep their space on the left. Memory tiles jump to a reply; **Latest reply** returns to the end of the conversation. A check means the native database reported completion, not merely that a reply file exists.
 
 **Details** shows the full conversation beside asmDB, with an event dock below them. Inspect the saved instructions, attempts and replies. [See the technical console and recovery evidence](Docs/ARCHITECTURE.md#7-browser-controller-and-observable-evidence).
 

@@ -1,6 +1,6 @@
 // Renders the local demo, preserving saved transcripts while workflow controls dispatch explicit controller commands.
 import { nativeRecordFields, conversationChapter, conversationMemory, conversationWorkflow, conversationActiveTurns, isConversationWorkflow, validConversation } from "/console-view.mjs";
-import { WORKFLOWS, workflowInfo, workflowSVG, workflowTurnCount } from "/workflow-catalog.mjs";
+import { WORKFLOWS, workflowInfo, workflowSVG, workflowTurnCount, graphSVG, workflowNodeStates } from "/workflow-catalog.mjs";
 
 const byId = (id) => document.getElementById(id);
 const ui = {
@@ -18,6 +18,7 @@ const ui = {
   workflow: byId("workflow-picker"), workflowLegend: byId("workflow-legend"), workflowHelp: byId("workflow-help"),
   workflowTitle: byId("overview-workflow-title"), workflowDescription: byId("overview-workflow-description"),
   workflowDiagram: byId("overview-workflow-diagram"), workflowMenu: byId("workflow-menu"), workflowSelection: byId("workflow-selection"),
+  workflowGraph: byId("overview-workflow-graph"), workflowGraphTitle: byId("memory-workflow-title"),
   approval: byId("human-approval"), approve: byId("approve-workflow"), reject: byId("reject-workflow"),
   overviewRoster: byId("overview-agents"),
   topicError: byId("conversation-topic-error"), conversationStart: byId("start-conversation"),
@@ -137,6 +138,7 @@ byId("workflow-options").innerHTML = WORKFLOWS.map(workflow =>
   <span class="workflow-mini">${workflowSVG(workflow)}</span></span><span class="workflow-caption">${workflow.caption}</span></span></label>`).join("");
 const workflowChoices = [...document.querySelectorAll('input[name="workflow"]')];
 let selectedWorkflow = "conversation.sequential";
+let previewWorkflow = false;
 let detailMode = "overview";
 const DEFAULT_TOPIC = "Pizza night in 30 minutes. Eight friends, $40, one oven. Pick dinner and split the jobs.";
 let lastConversation = null;
@@ -424,6 +426,7 @@ function acceptState(next) {
   if (isConversation(next) && (runChanged || activePhases.has(next.phase)
     || ["playing", "paused"].includes(next.playback?.status))) {
     selectedWorkflow = conversationWorkflow(next.conversation ?? lastConversation, next.run).kind;
+    previewWorkflow = false;
   }
   if (runChanged && isConversation(next)) {
     ui.topic.value = next.conversation?.topic ?? next.run.topic ?? ui.topic.value;
@@ -833,6 +836,29 @@ function renderOverview() {
     ui.workflowDiagram.innerHTML = workflowSVG(info);
     ui.workflowDiagram.dataset.kind = info.kind;
   }
+  const graphInfo = previewWorkflow ? workflowInfo(selectedWorkflow) : info;
+  text(ui.workflowGraphTitle, `${previewWorkflow || !current ? "Workflow preview" : "Workflow activity"} · ${graphInfo.name}`);
+  if (ui.workflowGraph.dataset.kind !== graphInfo.kind) {
+    ui.workflowGraph.innerHTML = graphSVG(graphInfo.kind);
+    ui.workflowGraph.dataset.kind = graphInfo.kind;
+  }
+  const graphStates = workflowNodeStates(graphInfo.kind, previewWorkflow ? {} : {
+    turns: snapshot?.turns ?? Array.from({ length: total }, (_, index) => ({ task_id: String(index + 1) })),
+    cells, activeTurns: liveTurns, checkpoint: current ? state.checkpoint : null,
+    live: hasLiveConversationProcess(), retained,
+  });
+  for (const node of graphStates) {
+    const root = ui.workflowGraph.querySelector(`[data-node="${node.id}"]`);
+    attribute(root, "data-state", node.state);
+    const mark = node.state === "completed" ? "✓ " : node.state === "skipped" ? "— " : ["active", "approval"].includes(node.state) ? "● " : "";
+    text(root.querySelector(".flow-status"), `${mark}${node.label}`);
+  }
+  for (const edge of ui.workflowGraph.querySelectorAll(".flow-edge")) {
+    const target = graphStates.find(node => node.id === edge.dataset.to);
+    const source = graphStates.find(node => node.id === edge.dataset.from);
+    attribute(edge, "data-skipped", target.state === "skipped" || source.state === "skipped");
+  }
+  attribute(ui.workflowGraph.querySelector("svg"), "aria-label", `${graphInfo.name}. ${graphStates.map(node => `${node.title}: ${node.label}`).join(". ")}. Repeated rounds share a node.`);
   attribute(ui.overviewRoster, "data-workflow", workflow.kind);
   attribute(ui.overviewRoster, "aria-label", topology);
   attribute(ui.roster, "aria-label", topology);
@@ -1551,6 +1577,7 @@ ui.conversationForm.addEventListener("submit", (event) => {
 for (const choice of workflowChoices) choice.addEventListener("change", () => {
   if (!choice.checked || ui.workflow.disabled || !isConversationWorkflow(choice.value)) return;
   selectedWorkflow = choice.value;
+  previewWorkflow = true;
   ui.workflowMenu.open = false;
   ui.workflowMenu.querySelector("summary").focus();
   renderConversationControls();

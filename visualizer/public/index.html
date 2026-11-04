@@ -97,6 +97,11 @@
             <header class="scene-heading"><h2 id="memory-title"><span class="scene-wordmark">asm<b>DB</b></span><span class="scene-caption">The memory</span></h2><svg class="memory-symbol" viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><ellipse cx="24" cy="11" rx="16" ry="6"/><path d="M8 11v25c0 8 32 8 32 0V11M8 23c0 8 32 8 32 0"/><path d="m20 33 3 3 6-7"/></svg></header>
             <div class="memory-tally"><strong><span id="overview-memory-count">0</span><span class="memory-total"> / <span id="overview-memory-total">8</span></span></strong><p>steps committed</p></div>
             <ol id="overview-memory-cells" class="memory-cells" aria-label="Turn records from asmDB. Published replies can be selected."></ol>
+            <section class="memory-workflow" aria-labelledby="memory-workflow-title">
+              <h3 id="memory-workflow-title">Workflow activity</h3>
+              <div id="overview-workflow-graph" class="workflow-canvas" tabindex="0" role="region" aria-label="Workflow graph and observed step states"></div>
+              <p class="workflow-key"><span>● Active</span><span>✓ Committed</span><span>— Skipped</span><span>Repeated rounds share a node.</span></p>
+            </section>
             <p id="overview-memory-note" class="memory-note">Nothing saved yet.</p>
             <div id="overview-proof" class="overview-proof" hidden><span aria-hidden="true">✓</span><p><strong>Restarted. Still here.</strong><span>No new model calls on replay.</span></p></div>
           </section>
