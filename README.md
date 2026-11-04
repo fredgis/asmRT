@@ -88,10 +88,10 @@ All eight use the same runtime, asmDB state and immutable context. These are exe
 | 1 | **Relay** | Planner → Builder → Critic → Editor, one turn at a time. Each reads all earlier committed replies. | Ordered drafting and review. |
 | 2 | **Discussion** | A seed opens parallel debate waves; a final synthesis reconciles the saved replies. | Comparing proposals and objections. |
 | 3 | **Conditional graph** | A committed decision selects a path before the result is finalized. | Different handling for different cases. |
-| 4 | **Role-based team** | A manager briefs specialists; their results feed a final synthesis. | Dividing a goal by expertise. |
+| 4 | **Role-based team** | A manager briefs parallel specialists, a writer synthesizes, then the manager reviews. | Dividing a goal by expertise. |
 | 5 | **Human approval** | Validate, wait for a person, then perform or skip local actions according to the saved decision. | Keeping a human in control. |
 | 6 | **Agent handoff** | Triage routes context to a specialist, whose answer returns to the coordinator. | Passing responsibility without losing context. |
-| 7 | **Hybrid orchestration** | A root agent combines ordered steps and parallel specialists, then merges their work. | Mixing dependencies and independent tasks. |
+| 7 | **Hybrid orchestration** | Parallel specialists feed a merge, bounded refinement/verification rounds and final synthesis. | Mixing dependencies and independent tasks. |
 | 8 | **Agent loop** | Gather context, plan, act and verify within a fixed iteration budget. | Revising a result with feedback. |
 
 Parallel requests can still be queued by the model server. None of these patterns promises faster inference or exactly-once external effects. [Exact contracts, decision rules and recovery boundaries →](Docs/WORKFLOWS.md)
@@ -225,8 +225,8 @@ Pizza night is a sample mission, not a requirement of the runtime. You can reuse
 | What you want to change | Current support |
 | --- | --- |
 | **The mission** | Already configurable: enter another topic before Start. |
-| **Agent names and instructions** | Saved in the plan, but currently initialized from predefined values. Exposing custom names and instructions requires a small configuration extension, not a new persistence engine. Internal agent IDs and the four-role structure remain fixed. |
-| **The local LLM** | Already configurable at launch: choose an installed Ollama model. All four agents currently share one model configuration. |
+| **Agent names and instructions** | Saved in the plan, but currently initialized by `agents()` in [src/chat.rs](src/chat.rs). Changing these defaults affects new runs; a user-facing editor requires a configuration extension, not a new persistence engine. Internal agent IDs and the four-role structure remain fixed. |
+| **The local LLM** | Set `ASMRT_OLLAMA_MODEL` before launching the console, or use `chat --model <installed-model>` in the CLI. All four agents currently share one model configuration. |
 | **A remote LLM provider or a different model per agent** | Requires code changes; neither is currently supported. |
 | **Steps, dependencies and routing rules** | The eight workflow structures are implemented in code. Arbitrary user-defined graphs are not yet configurable. |
 

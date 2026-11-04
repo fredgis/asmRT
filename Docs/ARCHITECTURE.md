@@ -39,7 +39,7 @@ flowchart TB
         UI <-->|"HTTP commands + state polling"| CTRL
     end
     subgraph RUST["One Rust process"]
-        H["Known handlers<br>sequential turns · parallel debate · demo workers"]
+        H["Known handlers<br>eight agent workflows · demo workers"]
         A["State Actor<br>64-request mailbox · acknowledged task index"]
         C["Native task codec<br>state · attempt · owner · references"]
         M["MCP client<br>one request at a time"]
@@ -197,7 +197,7 @@ An owner is **1–32 UTF-8 bytes**, without control characters. An artifact refe
 
 The decoder rejects unknown payload fields, unsupported tags, incomplete definitions, invalid state/owner/result combinations, and raw NUL, TAB, CR, or LF in `CONTENT`. Pending tasks have neither owner nor result. Running tasks require a positive attempt and an owner. Completed tasks additionally require a result.
 
-### Worked record: interrupted turn 5
+### Worked record: recovered turn 5
 
 This is a **synthetic codec example**, not a captured conversation. The repeated `a` and `b` digests below are illustrative 64-character values; a real handler calculates them from actual file bytes.
 
@@ -232,6 +232,7 @@ Native listings follow the engine's **hash-table/slot traversal order**, not sor
 | `llm.chat.turn` plus handler version 1, 2, or 3 | Which known handler/request encoding interprets a chat job; new runs use version 3 |
 | `asmrt.chat.reply.v1` | External reply artifact envelope |
 | `asmrt.conversation.v1` | Conversation manifest/ordered plan |
+| `conversation.*` plus workflow version `1` | One of eight supported ordering/input/control contracts; independent of job-handler versions |
 | `asmrt.demo.v1` | Deterministic demo result-file format |
 
 Native codec v2 is not “chat version 2.” Changing a handler's instructions or request encoding does not imply a native storage-format change. Older saved handler encodings are retained so their request hashes are not silently reinterpreted.
@@ -310,7 +311,7 @@ In Workflow 1, the second-round change is saved in the default scenario's turn i
 
 > The oven just broke. Save dinner without an oven.
 
-New-run agent prompts ask for **one or two short English sentences, about 12–28 words**. Every new job also ends with the saved instruction: **“Keep your whole reply to about 20 words.”** These are instructions to the model, not a hard word-count guarantee or frontend truncation: saved replies are not rewritten or shortened after generation. The topic, role instructions, turn instructions, and causal dependencies are persisted; the model supplies the actual words.
+New-run agent prompts ask for **one or two short English sentences, about 12–28 words**. Sequential and discussion jobs also end with the saved instruction: **“Keep your whole reply to about 20 words.”** The other workflows have concise, task-specific instructions, including exact control-marker requirements where applicable. These are instructions to the model, not a hard word-count guarantee or frontend truncation: saved replies are not rewritten or shortened after generation. The topic, role instructions, turn instructions, and causal dependencies are persisted; the model supplies the actual words for inference jobs.
 
 The oven change is saved in every default-topic job after turn 4 (turns 5–8 in the default two-round run), not inserted as a canned response. A single-round run has no oven-change turn. Custom topics retain generic turn behavior rather than inheriting an unrelated oven failure.
 
@@ -322,30 +323,30 @@ Those counts describe that deliberately chosen crash boundary. A different inter
 
 ### What is saved and reconstructed
 
-The saved manifest records the goal, roles, model identity/settings, and ordered turn plan. A task definition records the handler/version, agent, full saved instructions, goal, model settings, and preceding message IDs. A reply records the actual response together with definition/request hashes, input-file hashes, identities, and generation measurements.
+The saved manifest records the goal, roles, model identity/settings, workflow descriptor, and ordered turn plan. A task definition records the handler/version, agent, full saved instructions, goal, model settings, and preceding message IDs. A reply records the actual response together with definition/request hashes, input-file hashes, identities, and generation measurements. Human decisions, local actions and skipped paths use the same reply envelope with control metadata; they are not model generations.
 
 For role-aware jobs, the handler constructs a request from:
 
 1. The saved system/role instruction and user goal.
-2. **The job's saved committed input IDs**, in order: all earlier turns for Workflow 1, only prior waves for Workflow 2.
+2. **The job's saved committed input IDs**, in order: all earlier turns for Workflow 1, only prior waves for Workflow 2, or the dependency set defined by the other workflow contracts.
 3. Its own earlier replies as assistant messages, and named teammates' replies as user messages.
 4. Its own saved instruction for the current turn.
 
 This is replay of a known request-building contract, not a hidden in-memory conversation. Legacy handler versions 1 and 2 preserve their original request encodings; **version 3** introduced role-aware history and remains the version for new jobs. The shorter pizza exercise changes newly persisted role prompts and turn instructions, not the request encoding; there is no handler version 4. A saved job's version selects its encoding, so upgrading the application must not silently rewrite an old request hash.
 
-Before continuing, the application validates definition identity/digest, required committed dependencies, causal input hashes, saved request hashes, and completed reply-file hashes. Workflow 1 requires a contiguous committed prefix. Workflow 2 also accepts completed sibling gaps, such as 1/3/4 completed while 2 remains unfinished; downstream waves still wait for every required input. Unknown handlers, missing/changed required definitions, inconsistent plans, or changed committed replies stop execution instead of being replaced with plausible data.
+Before continuing, the application validates definition identity/digest, required committed dependencies, causal input hashes, saved request hashes, completed reply-file hashes and applicable control decisions. Workflow 1 requires a contiguous committed prefix. Workflows with parallel siblings also accept completed sibling gaps, such as 1/3/4 completed while 2 remains unfinished in discussion; downstream waves still wait for every required input. Unknown handlers, missing/changed required definitions, inconsistent plans, or changed committed replies stop execution instead of being replaced with plausible data.
 
 **Ordering matters:** `Runtime::open` performs native recovery before the chat application validates the manifest and other files. A failed file validation can therefore follow an already persisted `running -> pending` recovery transition. It does not mean that the run directory was opened read-only.
 
 ### Local-model boundary
 
-New runs use `qwen3.5:0.8b`. The tested Ollama package is approximately 1.3 GB, including vision/draft extras; the text component is about 752 million parameters. Package download size is not an asmRT memory or performance measurement. Earlier `qwen3:0.6b` saved runs remain supported.
+New runs default to `qwen3.5:0.8b`; another installed local model can be selected at launch. Model weights are a separate installation, not part of the native executable's footprint or an asmRT memory measurement. Earlier `qwen3:0.6b` saved runs remain supported.
 
 | Setting/boundary | Current behavior |
 | --- | --- |
 | Provider | Existing local Ollama service; no cloud key required |
 | Default endpoint | `http://127.0.0.1:11434` |
-| Allowed address | Literal loopback HTTP: `127.0.0.1` or `[::1]` |
+| Allowed address | Rust accepts literal loopback HTTP IP addresses; the browser controller restricts configuration to `127.0.0.1` or `[::1]` |
 | Rejected network features | Credentials, proxies, redirects, query strings, and fragments |
 | Inference request | `/api/chat`, `stream: false`, `think: false`, `keep_alive: "10m"` |
 | Baseline model settings | `num_ctx: 4096`, `num_predict: 160`, temperature `0.5`, base seed `42`; request seed is saved base seed plus turn ID |
@@ -425,7 +426,7 @@ sequenceDiagram
 
 Atomic file publication and native completion are **two separate steps**. They deliberately permit an orphan published result, rather than committing a reference to a result that has not been published. Recovery can reuse a matching orphan; there is no two-phase transaction covering the file and native record.
 
-The implementation uses file flushing and non-clobber publication; the deterministic writer also syncs the parent directory on Unix. The verified fault cases concern process loss. They are not certification of power-loss, device-failure, filesystem, or hardware-cache guarantees. File hashes detect mismatches against saved bindings; they are not a substitute for filesystem access control.
+The implementation uses file flushing and non-clobber publication; both the chat and deterministic writers also sync the parent directory on Unix. The verified fault cases concern process loss. They are not certification of power-loss, device-failure, filesystem, or hardware-cache guarantees. File hashes detect mismatches against saved bindings; they are not a substitute for filesystem access control.
 
 ### Backup and restore
 
@@ -446,7 +447,9 @@ The console offers two presentations of the **same run**, not independent execut
 
 The native radio selection is keyboard-operable and stored only in browser local storage. View switches and reply browsing issue no runtime command or model call. A previously checked raw-field option cannot spill technical JSON into Overview. Errors and retained-state notices remain visible in both modes. Responsive layouts stack the panes rather than shrinking the content into unreadable columns.
 
-The diagrammed selector offers [**eight workflow types**](WORKFLOWS.md) before a new run. The saved-plan inspector identifies the active type separately from the task-handler version. A saved run keeps its workflow; reset starts a fresh choice rather than changing its history. Multiple robots can be genuinely active during parallel work. Human approval has explicit decision controls shared by both views.
+The diagrammed selector offers [**eight workflow types**](WORKFLOWS.md) before a new run. Overview places the full workflow graph beneath the right-hand memory tiles, leaving the conversation on the left. Choosing a type previews its graph immediately without rewriting the retained conversation or memory. During execution, observed active nodes use their role colors; saved, committed, skipped and last-observed states remain distinct. Repeated rounds aggregate into graph stages rather than creating a node per task.
+
+The saved-plan inspector identifies the active type separately from the task-handler version. A saved run keeps its workflow; reset starts a fresh choice rather than changing its history. Multiple robots can be genuinely active during parallel work. Human approval has explicit decision controls shared by both views.
 
 `ready.conversation.turns` supplies each job's role and dependency IDs. The controller tracks `conversation.active_turns` independently, clears only the completed job, and sorts observed replies by task ID. `conversation.active` remains the first active turn or null for older readers. Workflow 2 restores completed sibling gaps without pretending its messages form a sequential prefix.
 
@@ -480,7 +483,7 @@ These captures show actual saved Ollama replies and native records, not the mode
 
 ![Details: conversation and native asmDB records with a visible event dock](assets/screenshots/deep-dive.png)
 
-The stopped view below comes from a manual interruption of a retained run during a controller upgrade. Its counts reflect that interruption point, not the default turn-5 teaching crash described above.
+The stopped view below retains the last observed state. Its counts reflect its own interruption point, not necessarily the default relay turn-5 teaching crash described above.
 
 ![Stopped Rust runtime with retained replies and last-observed native state](assets/screenshots/recovery.png)
 
@@ -488,11 +491,12 @@ The stopped view below comes from a manual interruption of a retained run during
 
 ### HTTP surface
 
-Command routes require the exact local `Origin`, JSON input, and `X-Asmrt-Token` containing the per-launch `csrf_token` supplied by state. These are local command protections, not a remotely authenticated multi-user service.
+Command routes require the exact local `Origin`, JSON input, and `X-Asmrt-Token` containing the per-controller-launch `csrf_token` supplied by state. These are local command protections, not a remotely authenticated multi-user service.
 
 | Route | Purpose |
 | --- | --- |
 | `GET /api/state` | Current controller observations, messages, playback, last database response, and command token |
+| `GET /api/workflows` | Registry of the eight supported workflow choices |
 | `POST /api/conversation` | Start a new conversation; optional topic of 1–400 Unicode characters, rounds 1–3 (default 2), and a canonical `workflow` string from the eight-type registry (`conversation.sequential` by default) |
 | `POST /api/storage` | Start the separate deterministic storage story |
 | `POST /api/play` | Start/resume automatic playback of the current story |
@@ -501,7 +505,7 @@ Command routes require the exact local `Origin`, JSON input, and `X-Asmrt-Token`
 | `POST /api/interrupt` | Interrupt the owned runtime |
 | `POST /api/resume` | Reopen/resume the saved run without automatically starting playback |
 | `POST /api/reset` | Stop and clear the selected demo, preserve saved runs; 202 with fresh idle state |
-| `POST /api/start`, `POST /api/next` | Retained manual/legacy controls; `next` uses the current checkpoint identity |
+| `POST /api/run`, `POST /api/next` | Manual deterministic run and checkpoint continuation; `next` uses the current checkpoint identity |
 | `GET /api/definitions/:id` | Read a validated saved task definition |
 | `GET /api/artifacts/:id` | Read an actual saved result/reply |
 
@@ -513,7 +517,7 @@ A new conversation does not silently terminate already active work. Checkpoint c
 
 The guided deterministic demo claims up to the configured worker count, waits, publishes that batch's files, waits again, then commits its completions. A partial last batch is valid. A fully completed demo replay rereads the database and exits without needing stdin or doing new work. The controller uses acknowledged gates rather than a browser-side animation to direct execution.
 
-Guided chat uses the same stages. Sequential checkpoints contain one turn; discussion checkpoints contain the seed, a debate wave, the unfinished subset of a recovered wave, or the synthesis. One shared stdin continuation releases each gate; concurrent jobs do not race to read commands. A completed chat replay exits without requiring another guided continuation.
+Guided chat uses the same stages. Sequential checkpoints contain one turn; discussion checkpoints contain the seed, a debate wave, the unfinished subset of a recovered wave, or the synthesis. Other workflows likewise group adjacent jobs with identical saved input IDs into waves, waiting for their required commitments before continuing. One shared stdin continuation releases each gate; concurrent jobs do not race to read commands. A completed chat replay exits without requiring another guided continuation.
 
 The human-gated workflow adds stage `approval`. It is not released by automatic playback or a generic Next command; the browser sends an explicit decision for the current checkpoint. Its saved decision and local action artifacts are described in the [workflow contracts](WORKFLOWS.md).
 
@@ -679,7 +683,7 @@ $env:ASMRT_ASMDB_REPO = "$HOME\repo-asmdb"
 
 # Build the CLI used by the HTTP tests
 & .\scripts\cargo.ps1 build --locked --quiet
-node --test .\visualizer\test\server.test.mjs .\visualizer\test\conversation.test.mjs
+node --test .\visualizer\test\*.test.mjs
 
 # Windows, PowerShell 7+: terminate only processes owned by the fault harness
 & .\scripts\test-recovery.ps1 -AsmdbDir $env:ASMRT_ASMDB_REPO
@@ -692,12 +696,12 @@ node --test .\visualizer\test\server.test.mjs .\visualizer\test\conversation.tes
 | [CLI tests](../tests/cli.rs) | Real publication/replay, guided waits, overlapping discussion requests, non-prefix sibling recovery, conflicting results left untouched |
 | [Fault harness](../scripts/test-recovery.ps1) | Separate loss of Rust, Node bridge, and engine; lock/child cleanup; reuse after publication-before-completion |
 | [Storage controller tests](../visualizer/test/server.test.mjs) | HTTP validation, actual observations, automatic/manual gates, pause/restart, reset while paused/playing, timer cancellation, preserved runs |
-| [Conversation controller tests](../visualizer/test/conversation.test.mjs) | Causal inputs, three-request overlap, shared wave context, saved-wave reuse, interruption/resume, offline replay, model identity, workflow validation and reset |
-| [Console helpers](../visualizer/test/console.test.mjs) | Exact raw/readable native values, graphical saved-versus-committed memory, malformed records and observation-driven recovery chapters |
+| [Conversation controller tests](../visualizer/test/conversation.test.mjs) | All eight workflows, causal inputs, overlap, saved-wave reuse, interruption/resume, offline replay, explicit approval, control decisions, model identity and reset |
+| [Console helpers](../visualizer/test/console.test.mjs) | Exact native values, saved-versus-committed memory, workflow graphs, malformed records and observation-driven recovery chapters |
 
 The conversation integration tests use an explicitly **test-only local HTTP model fixture** for deterministic failure cases. It is not the application model and its responses are not fallback dialogue. Rust tests in [chat.rs](../src/chat.rs) also check preserved v1/v2/v3 request hashes and replay of earlier saved plans/prefixes without rewriting their files. A genuine Ollama run and browser evidence are separate from a successful fixture test.
 
-Real-engine tests use isolated disposable databases. Some controller cases skip if the required binary/environment is missing; inspect the test result rather than assuming skipped cases passed. The deliberate second-writer rejection can emit an expected Node startup error while the containing test succeeds. Test counts are not an architectural contract.
+Real-engine tests use isolated disposable databases. Native controller cases skip if `ASMRT_ASMDB_REPO` is unset; once enabled, missing binaries fail setup. Pure console and topology checks do not need the native engine. Inspect the test result rather than assuming skipped cases passed. The deliberate second-writer rejection can emit an expected Node startup error while the containing test succeeds. Test counts are not an architectural contract.
 
 A useful recovery check verifies all of the following, not just a final animation:
 
@@ -736,7 +740,7 @@ Leases, controlled tools, explicit framework adapters, and remote/cloud coordina
 | Agent | A logical conversation role with saved instructions; not necessarily its own process or model |
 | Handler | Known Rust code interpreting a supported saved task definition |
 | Task | Durable unit identified by a nonzero native ID |
-| Turn | One conversation contribution, represented by a typed task; discussion siblings can execute concurrently |
+| Turn | One planned model contribution, human decision, local result or skip, represented by a typed task; independent siblings can execute concurrently |
 | Claim | Acknowledged running task identified by owner, attempt, and definition |
 | Attempt | Claim generation; preserved by requeue, incremented by the next claim |
 | Owner | Application label on a claim; not a credential, lease, or process ID |

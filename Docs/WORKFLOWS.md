@@ -9,10 +9,10 @@ A workflow type names an orchestration contract, not a task handler or a model. 
 | 1 | `conversation.sequential` | `1` | Implemented | Fixed-order agent turns over a shared committed conversation prefix, repeated for a fixed number of rounds. |
 | 2 | `conversation.discussion` | `1` | Implemented | Planner seed, concurrent Builder/Critic/Editor debate waves, committed fan-in, final Editor decision. |
 | 3 | `conversation.graph` | `1` | Implemented | A committed routing decision selects a conditional branch, followed by a result. |
-| 4 | `conversation.roles` | `1` | Implemented | Manager brief, specialist delegation and synthesis. |
+| 4 | `conversation.roles` | `1` | Implemented | Manager brief, parallel specialists, writer synthesis and manager review. |
 | 5 | `conversation.approval` | `1` | Implemented | Validation, explicit durable human decision, local actions or recorded skips. |
 | 6 | `conversation.handoff` | `1` | Implemented | Triage, selected specialist, return to coordinator. |
-| 7 | `conversation.hybrid` | `1` | Implemented | Ordered work and parallel specialists followed by a merge. |
+| 7 | `conversation.hybrid` | `1` | Implemented | Parallel specialists and merge, bounded refinement/verification, final synthesis. |
 | 8 | `conversation.loop` | `1` | Implemented | Bounded planning, action and verification with saved feedback. |
 
 The existing **storage demo** (`demo` CLI command) is a deterministic concurrent runtime exercise, not another registered agent workflow type.
@@ -55,7 +55,7 @@ Native task records and immutable external files have different responsibilities
 - Native 256-byte records hold coordination state, claims/attempts, definition references, and completed reply hashes, not the conversation text or workflow descriptor.
 - `artifacts/<id>.json` holds the actual reply, identities, job/request hashes, causal input-file hashes, and generation measurements.
 
-The turn loop claims the next job, validates any existing reply or performs inference, flushes and atomically publishes the reply without overwriting saved work, then commits completion through the State Actor. **Only after completion is acknowledged does the reply enter the committed prefix and the loop advance to the next turn.** Guided checkpoints may delay advancement; they do not change this order. All jobs can already be enqueued as pending; pending status alone does not make a later turn eligible for inference.
+The turn loop first validates any existing reply against the job and its committed inputs, then claims the job. It reuses that valid reply or performs inference, flushes and atomically publishes new output without overwriting saved work, then commits completion through the State Actor. **Only after completion is acknowledged does the reply enter the committed prefix and the loop advance to the next turn.** Guided checkpoints may delay advancement; they do not change this order. All jobs can already be enqueued as pending; pending status alone does not make a later turn eligible for inference.
 
 ### Validation, recovery, and retries
 
@@ -108,7 +108,7 @@ All use saved dependency IDs and the same native claim/publish/commit lifecycle.
 
 ### 3. Conditional graph
 
-The router's committed reply chooses A or B using a standalone `ROUTE=A` or `ROUTE=B` marker. Missing or invalid routing output falls back to **B**. Only the selected branch performs model work; the other publishes an explicit skipped result. A final job joins the saved results.
+The router's committed reply chooses A or B using exactly one standalone `ROUTE=A` or `ROUTE=B` marker. Missing, invalid or multiple routing markers fall back to **B**. Only the selected branch performs model work; the other publishes an explicit skipped result. A final job joins the saved results.
 
 ### 4. Role-based team
 
@@ -130,7 +130,7 @@ A committed triage result chooses a specialist with `ROUTE=BILLING` or `ROUTE=SU
 
 ### 7. Hybrid orchestration
 
-A root brief releases researcher and analyst in parallel; a writer merges their results. This is followed by `r` ordered Builder-refinement / Critic-verification pairs, then a final Editor synthesis. After the two parallel specialists, every job reads all preceding jobs. It combines fan-out/fan-in with bounded iterative refinement.
+A root brief releases researcher and analyst in parallel; a writer merges their results. This is followed by up to `r` ordered Builder-refinement / Critic-verification pairs, then a final Editor synthesis. A standalone `RESULT=DONE` verification marker skips remaining pairs; `RESULT=RETRY`, missing or invalid markers continue within the budget. Skipped jobs still commit local artifacts and final synthesis still runs. After the two parallel specialists, every job reads all preceding jobs. It combines fan-out/fan-in with bounded iterative refinement.
 
 ### 8. Agent loop
 
@@ -138,9 +138,9 @@ Gather context, then run up to `r` **plan → local action → verify** cycles b
 
 ### Saved control evidence
 
-Control results extend reply JSON with `control: {kind, value, source_task_id, source_sha256, fallback?, skipped?}`. The source hash binds a decision to its committed input. Skipped branches produce completed local artifacts with explicit skipped text and zero generated tokens; they are not invented model replies or unfinished jobs.
+Control results extend reply JSON with `control: {kind, value, source_task_id, source_sha256, fallback?, skipped?}`. The source hash binds a decision to its committed input. Routing and verification accept exactly one recognized marker line; multiple markers are invalid even when their values agree. Skipped branches produce completed local artifacts with explicit skipped text and zero generated tokens; they are not invented model replies or unfinished jobs.
 
-Replay recomputes the expected control result and validates its text, zero-token local output, dependency hashes and native artifact commitment. A changed decision source or inconsistent skipped result stops recovery rather than silently rerouting. Existing envelopes remain `asmrt.chat.reply.v1`; definitions retain `llm.chat.turn` v3, with the saved workflow contract dispatching the local/control steps.
+Replay recomputes the expected control metadata and validates dependency hashes and native artifact commitments. Deterministic local results, including skipped branches, must also match their expected text and zero-token counts. A changed decision source or inconsistent skipped result stops recovery rather than silently rerouting. Existing envelopes remain `asmrt.chat.reply.v1`; new definitions retain `llm.chat.turn` v3, with the saved workflow contract dispatching the local/control steps.
 
 ## Selecting a workflow
 

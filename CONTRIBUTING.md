@@ -23,9 +23,9 @@ Read the [architecture](Docs/ARCHITECTURE.md) for process boundaries and the [do
 
 ## Workflow changes
 
-Two agent workflows are implemented: **Workflow 1: sequential conversation** (`conversation.sequential` v1) and **Workflow 2: discussion** (`conversation.discussion` v1). The first supplies an ordered committed prefix to one speaker at a time. The second runs three peers concurrently over the same prior-wave inputs, then joins their committed replies before continuing or synthesizing a decision.
+Eight bounded agent workflows are implemented: **relay, discussion, conditional graph, role-based team, human approval, agent handoff, hybrid orchestration and agent loop**. Their canonical kinds and current v1 contracts are listed in [WORKFLOWS.md](Docs/WORKFLOWS.md). They share the same State Actor and saved-file formats; their ordering, input sets and control decisions differ.
 
-A new workflow needs its own explicit contract for ordering, inputs, completion, retries and recovery. Update [WORKFLOWS.md](Docs/WORKFLOWS.md), the architecture, domain vocabulary and README as appropriate. Workflow versions and job-handler versions are separate. Conditional routing and arbitrary user-defined graphs are future extensions.
+A new workflow needs its own explicit contract for ordering, inputs, completion, retries and recovery. Keep Rust's plan validation and execution in [src/chat.rs](src/chat.rs), the controller's topology observer in [conversation-story.mjs](visualizer/conversation-story.mjs), and the browser's graph mapping in [workflow-catalog.mjs](visualizer/public/workflow-catalog.mjs) consistent. Update the workflow reference, architecture, domain vocabulary and README as appropriate. Workflow versions and job-handler versions are separate. Arbitrary user-defined graphs remain a future extension; fixed conditional routing is already implemented.
 
 ## Validate your change
 
@@ -35,13 +35,19 @@ Start with the smallest test selection covering the change. For a runtime or con
 & .\scripts\cargo.ps1 fmt --all --check
 & .\scripts\cargo.ps1 test --locked --quiet
 & .\scripts\cargo.ps1 clippy --locked --all-targets '--' -D warnings
+# Build the executable that the Node integration tests launch
+& .\scripts\cargo.ps1 build --locked --quiet
 node --test .\visualizer\test\*.test.mjs
 ```
 
-The Node integration tests use real Rust and asmDB, with a test-only local model fixture. They do not need an Ollama model download. Run fault tests when changing persistence or process cleanup:
+The Node integration tests require `ASMRT_ASMDB_REPO` and the built Rust executable. Conversation tests use a test-only local model fixture, so no Ollama download is needed. Native Node cases skip when `ASMRT_ASMDB_REPO` is unset; once enabled, a missing executable is a failure, not a successful check. The pure console tests can run alone with `node --test .\visualizer\test\console.test.mjs`.
+
+Rust's real-engine integration tests are ignored by default. Run them explicitly, and use the separate Windows fault harness when changing persistence or process cleanup:
 
 ```powershell
 & .\scripts\cargo.ps1 test --locked --quiet '--' --ignored --test-threads=1
+# Windows with PowerShell 7+: actual Rust/bridge/engine process termination
+& .\scripts\test-recovery.ps1 -AsmdbDir $env:ASMRT_ASMDB_REPO
 ```
 
 Use isolated run directories and controller ports. Do not interrupt someone else's running demo or overwrite its active executable to run tests.
