@@ -30,6 +30,7 @@ type CliResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Parser)]
 #[command(
     version,
+    long_version = include_str!("../VERSION").trim(),
     about = "Local durable coordination over the unchanged asmDB MCP bridge"
 )]
 struct Cli {
@@ -53,6 +54,8 @@ enum Action {
     Chat(chat::Options),
     #[command(about = "Open exclusively, reconcile interrupted tasks, then print persisted counts")]
     Status,
+    #[command(hide = true)]
+    ControllerLock,
 }
 
 #[derive(Args)]
@@ -111,12 +114,16 @@ async fn run(cli: Cli) -> CliResult<()> {
         return Err(io::Error::other("--pause requires --workers 1").into());
     }
     let directory = std::path::absolute(cli.data_dir)?;
+    if matches!(cli.command, Action::ControllerLock) {
+        return controller_lock(&directory);
+    }
     if matches!(cli.command, Action::Status) && !directory.join(".asmrt-owner").is_file() {
         return Err(io::Error::other("no asmRT state here; run the demo first").into());
     }
     let runtime = Runtime::open(Config::new(cli.asmdb_dir, &directory)).await?;
     let state = runtime.state();
     let result = match cli.command {
+        Action::ControllerLock => unreachable!("controller lock does not open asmDB"),
         Action::Status => state
             .list()
             .await
@@ -147,6 +154,32 @@ async fn run(cli: Cli) -> CliResult<()> {
     let summary = result?;
     shutdown?;
     emit(&summary)?;
+    Ok(())
+}
+
+// The controller keeps stdin open. EOF (including parent loss) releases the OS
+// lock; never unlink this file, which would allow locking a replacement inode.
+fn controller_lock(directory: &Path) -> CliResult<()> {
+    let filename = directory.join(".visualizer-lock");
+    if fs::symlink_metadata(&filename).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(io::Error::other("controller lock must be a regular file").into());
+    }
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(filename)?;
+    lock.try_lock().map_err(|error| {
+        io::Error::other(format!(
+            "visualizer data root is already owned or cannot be locked: {error}"
+        ))
+    })?;
+    emit(
+        &json!({"event": "controller_lock_acquired", "version": include_str!("../VERSION").trim()}),
+    )?;
+    io::copy(&mut io::stdin().lock(), &mut io::sink())?;
+    drop(lock);
     Ok(())
 }
 

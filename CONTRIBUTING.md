@@ -40,17 +40,23 @@ Start with the smallest test selection covering the change. For a runtime or con
 node --test .\visualizer\test\*.test.mjs
 ```
 
-The Node integration tests require `ASMRT_ASMDB_REPO` and the built Rust executable. Conversation tests use a test-only local model fixture, so no Ollama download is needed. Native Node cases skip when `ASMRT_ASMDB_REPO` is unset; once enabled, a missing executable is a failure, not a successful check. The pure console tests can run alone with `node --test .\visualizer\test\console.test.mjs`.
+The default Rust suite includes a small Node MCP protocol fixture, but it does not prove native persistence. The Node integration tests require `ASMRT_ASMDB_REPO` and the built Rust executable. Conversation tests use a test-only local model fixture, so no Ollama download is needed. Native Node cases skip when `ASMRT_ASMDB_REPO` is unset; once enabled, a missing executable is a failure, not a successful check. The pure console tests can run alone with `node --test .\visualizer\test\console.test.mjs`.
 
 Rust's real-engine integration tests are ignored by default. Run them explicitly, and use the separate Windows fault harness when changing persistence or process cleanup:
 
 ```powershell
-& .\scripts\cargo.ps1 test --locked --quiet '--' --ignored --test-threads=1
+$env:ASMRT_ASMDB_REPO = "$HOME\repo-asmdb"
+& .\scripts\cargo.ps1 test --locked --quiet '--' --include-ignored --test-threads=1
+node --test .\visualizer\test\*.test.mjs
 # Windows with PowerShell 7+: actual Rust/bridge/engine process termination
 & .\scripts\test-recovery.ps1 -AsmdbDir $env:ASMRT_ASMDB_REPO
 ```
 
 Use isolated run directories and controller ports. Do not interrupt someone else's running demo or overwrite its active executable to run tests.
+
+A native validation report must record the command, toolchain and enabled prerequisites, and show **zero ignored/skipped cases** in the two full suites above. Default-suite passes alone are not a native quality gate. The fault harness separately verifies actual process termination and recovery.
+
+For a release, update the Cargo package version, regenerate `Cargo.lock`, and update [VERSION](VERSION) (`semver (YYYY-MM-DD)`). The compiled runtime embeds that release identity; the controller serves its source release in HTML and compares it with the binary's lock handshake. Release versions are independent of saved task, job and workflow schema versions.
 
 ## Send a pull request
 

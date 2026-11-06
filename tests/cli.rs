@@ -7,11 +7,61 @@
 
 use std::{
     fs,
+    io::{BufRead, BufReader},
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use serde_json::Value;
+
+#[test]
+fn controller_lock_excludes_competitors_and_releases_after_eof_or_process_loss() {
+    let directory = tempfile::tempdir().unwrap();
+    let start = || {
+        Command::new(env!("CARGO_BIN_EXE_asmrt"))
+            .args(["--asmdb-dir", "unused", "--data-dir"])
+            .arg(directory.path())
+            .arg("controller-lock")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    for crash in [false, true, false] {
+        let mut holder = start();
+        let mut line = String::new();
+        BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let event: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(event["event"], "controller_lock_acquired");
+        assert_eq!(event["version"], include_str!("../VERSION").trim());
+        let competitor = start().wait_with_output().unwrap();
+        assert!(!competitor.status.success());
+        assert!(String::from_utf8_lossy(&competitor.stderr).contains("already owned"));
+        if crash {
+            holder.kill().unwrap();
+        } else {
+            drop(holder.stdin.take());
+        }
+        holder.wait().unwrap();
+    }
+    assert!(
+        !directory.path().join(".asmrt-owner").exists(),
+        "locking must not initialize a database"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_asmrt"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("asmrt {}", include_str!("../VERSION").trim())
+    );
+    assert!(include_str!("../VERSION").starts_with(concat!(env!("CARGO_PKG_VERSION"), " ")));
+}
 
 fn invoke(directory: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_asmrt"))

@@ -12,9 +12,51 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { createVisualizer } from '../server.mjs';
+import { createVisualizer, validateTaskEvent } from '../server.mjs';
 
 const asmdbDir = process.env.ASMRT_ASMDB_REPO;
+
+function taskEvent(name, attempt, owner = 'worker-1', artifact = null, definition = null) {
+  const state = name === 'task_claimed' ? 'running' : 'completed';
+  const content = { o: owner, ...(artifact ? { r: artifact } : {}),
+    ...(definition ? { d: definition.reference, h: definition.sha256 } : {}) };
+  return { event: name, task_id: '1', owner, attempt, artifact,
+    task: { id: '1', state, owner, attempt, artifact, definition,
+      record: { id: '1', value: attempt, tag: `asmrt.v${definition ? 2 : 1}.${state}`, content: JSON.stringify(content) } } };
+}
+
+test('task events reject stale claims, forged completions and divergent native fields', () => {
+  const pending = { ...taskEvent('task_claimed', '0').task, state: 'pending', owner: null, artifact: null };
+  const claim = taskEvent('task_claimed', '1');
+  assert.doesNotThrow(() => validateTaskEvent(claim, pending));
+  for (const mutate of [
+    e => { e.task.state = 'completed'; },
+    e => { e.attempt = e.task.attempt = e.task.record.value = '0'; },
+    e => { e.owner = 'other'; },
+    e => { e.task.record.content = '{"o":"other"}'; },
+    e => { e.task.record.tag = 'asmrt.v1.pending'; },
+    e => { e.task.record.id = '2'; },
+    e => { e.task.record.value = '2'; },
+    e => { e.task.definition = { reference: 'job:1', sha256: 'a'.repeat(64) }; },
+  ]) {
+    const bad = structuredClone(claim);
+    mutate(bad);
+    assert.throws(() => validateTaskEvent(bad, pending), /task|claim|record|transition/i);
+  }
+  const published = { ...claim.task, published: true, published_sha256: 'artifact:1' };
+  const completion = taskEvent('task_completed', '1', 'worker-1', 'artifact:1');
+  assert.doesNotThrow(() => validateTaskEvent(completion, published));
+  for (const previous of [pending, claim.task, completion.task]) {
+    assert.throws(() => validateTaskEvent(completion, previous), /task|claim|record|transition/i);
+  }
+  assert.throws(() => validateTaskEvent(taskEvent('task_completed', '2', 'worker-1', 'artifact:1'), published), /task|claim|record|transition/i);
+  assert.throws(() => validateTaskEvent(taskEvent('task_completed', '1', 'worker-2', 'artifact:1'), published), /task|claim|record|transition/i);
+  assert.throws(() => validateTaskEvent(taskEvent('task_completed', '1', 'worker-1', 'artifact:2'), published), /task|claim|record|transition/i);
+  const definition = { reference: 'job:1', sha256: 'a'.repeat(64) };
+  const typed = taskEvent('task_claimed', '9007199254740993', 'planner', null, definition);
+  const previous = { ...typed.task, state: 'pending', attempt: '9007199254740992', owner: null };
+  assert.doesNotThrow(() => validateTaskEvent(typed, previous), 'attempts retain full integer precision');
+});
 
 async function fixture(t, options = {}) {
   const dataRoot = await mkdtemp(path.join(tmpdir(), 'asmrt-visual-test-'));
@@ -56,6 +98,115 @@ async function until(read, predicate, message) {
   }
   assert.fail(message);
 }
+
+test('one controller owns a data root until close, without affecting independent roots', { skip: !asmdbDir }, async t => {
+  const { server, dataRoot, state, post } = await fixture(t);
+  await assert.rejects(async () => {
+    const second = await createVisualizer({ asmdbDir, binary: process.env.ASMRT_TEST_BINARY, dataRoot, port: 0 });
+    await second.close();
+  }, /already owned|locked/i);
+  const independent = await fixture(t);
+  assert.equal((await independent.state()).phase, 'idle');
+  assert.equal((await post('run', { tasks: 1, work_ms: 0 })).status, 202);
+  await until(state, s => s.phase === 'finished', 'first controller lost ownership');
+  const saved = await readFile(path.join(dataRoot, 'latest.json'), 'utf8');
+  await server.close();
+  const replacement = await createVisualizer({ asmdbDir, binary: process.env.ASMRT_TEST_BINARY, dataRoot, port: 0 });
+  try {
+    assert.equal((await (await fetch(`${replacement.url}/api/state`)).json()).phase, 'interrupted');
+    assert.equal(await readFile(path.join(dataRoot, 'latest.json'), 'utf8'), saved);
+  } finally { await replacement.close(); }
+});
+
+test('controller startup failure releases ownership and serves the compiled release identity', { skip: !asmdbDir }, async t => {
+  const occupied = await fixture(t);
+  const directory = await mkdtemp(path.join(tmpdir(), 'asmrt-lock-startup-'));
+  const options = { asmdbDir, binary: process.env.ASMRT_TEST_BINARY, dataRoot: directory };
+  try {
+    await assert.rejects(createVisualizer({ ...options, port: Number(new URL(occupied.server.url).port) }), { code: 'EADDRINUSE' });
+    const retry = await createVisualizer({ ...options, port: 0 });
+    try {
+      const state = await (await fetch(`${retry.url}/api/state`)).json();
+      const version = (await readFile(new URL('../../VERSION', import.meta.url), 'utf8')).trim();
+      assert.deepEqual(state.version, { console: version, runtime: version });
+      const html = await (await fetch(retry.url)).text();
+      assert(html.includes(`<span id="release-version">asmRT ${version}</span>`));
+      assert(!html.includes('Version unavailable'));
+    } finally { await retry.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('loss of controller ownership stops its worker and rejects subsequent commands', { skip: !asmdbDir }, async t => {
+  const spawn = ChildProcess.prototype.spawn;
+  let holder;
+  const observe = t.mock.method(ChildProcess.prototype, 'spawn', function(options) {
+    const result = spawn.call(this, options);
+    if (options.args.includes('controller-lock')) holder = this;
+    return result;
+  });
+  const { state, post } = await fixture(t);
+  observe.mock.restore();
+  assert(holder);
+  assert.equal((await post('run', { tasks: 4, work_ms: 5000 })).status, 202);
+  const running = await until(state, s => s.tasks.some(task => task.state === 'running'), 'worker did not claim a task');
+  holder.kill('SIGKILL');
+  let stopped;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    stopped = await state();
+    if (stopped.phase === 'error') break;
+    await delay(50);
+  }
+  assert.equal(stopped.phase, 'error');
+  assert.match(stopped.error, /ownership lost/i);
+  assert.equal(stopped.pid, null);
+  assert.throws(() => process.kill(running.pid, 0), { code: 'ESRCH' });
+  assert.equal((await post('reset')).status, 409);
+});
+
+test('a malformed native claim cannot change the HTTP task snapshot', { skip: !asmdbDir }, async t => {
+  const { state, post } = await fixture(t);
+  const spawn = ChildProcess.prototype.spawn;
+  let injected = false;
+  t.mock.method(ChildProcess.prototype, 'spawn', function(options) {
+    const result = spawn.call(this, options);
+    if (!options.args.includes('demo')) return result;
+    const emit = this.stdout.emit;
+    let buffered = '';
+    t.mock.method(this.stdout, 'emit', function(name, ...args) {
+      if (name !== 'data') return emit.call(this, name, ...args);
+      buffered += args[0];
+      let end;
+      while ((end = buffered.indexOf('\n')) !== -1) {
+        const event = JSON.parse(buffered.slice(0, end));
+        buffered = buffered.slice(end + 1);
+        if (!injected && event.event === 'task_claimed') {
+          const valid = JSON.stringify(event);
+          event.task.record.content = '{"o":"forged"}';
+          injected = true;
+          emit.call(this, 'data', `${JSON.stringify(event)}\n`);
+          emit.call(this, 'data', `${valid}\n`);
+          continue;
+        }
+        emit.call(this, 'data', `${JSON.stringify(event)}\n`);
+      }
+      return true;
+    });
+    return result;
+  });
+  assert.equal((await post('run', { tasks: 1, work_ms: 5000 })).status, 202);
+  let rejected;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    rejected = await state();
+    if (rejected.phase === 'error') break;
+    await delay(50);
+  }
+  assert(injected);
+  assert.equal(rejected.phase, 'error');
+  assert.match(rejected.error, /record payload disagrees/i);
+  assert.equal(rejected.tasks[0].state, 'pending');
+  assert.equal(rejected.tasks[0].attempt, '0');
+  assert.equal(rejected.tasks[0].record.content, '{}');
+});
 
 test('one Play command times a real crash, rereads asmDB, recovers only unfinished work and verifies zero-work replay', { skip: !asmdbDir }, async t => {
   const { state, post } = await fixture(t, { storySceneMs: 180 });

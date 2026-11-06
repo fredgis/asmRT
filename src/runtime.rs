@@ -360,7 +360,19 @@ async fn persist(mcp: &mut Mcp, method: &str, task: &Task) -> Result<()> {
     let result = mcp
         .tool(method, serde_json::to_value(&record).map_err(config_error)?)
         .await?;
-    if result["id"] != record.id || result["value"] != record.value || result["tag"] != record.tag {
+    validate_write_ack(&record, &result)
+}
+
+// The current bridge echoes id/value/tag, not content. Missing content is not
+// read-back proof; if a future bridge echoes it, a mismatch is still fatal.
+fn validate_write_ack(record: &crate::Record, result: &serde_json::Value) -> Result<()> {
+    if result["id"] != record.id
+        || result["value"] != record.value
+        || result["tag"] != record.tag
+        || result
+            .get("content")
+            .is_some_and(|content| content != &record.content)
+    {
         return Err(Error::Transport(
             "write acknowledgement does not match the task".into(),
         ));
@@ -370,4 +382,41 @@ async fn persist(mcp: &mut Mcp, method: &str, task: &Task) -> Result<()> {
 
 fn config_error(error: impl std::fmt::Display) -> Error {
     Error::Invalid(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn write_ack_preserves_legacy_bridge_contract_and_rejects_divergence() {
+        let record = Task::pending(1)
+            .unwrap()
+            .claimed("worker-1")
+            .unwrap()
+            .encode()
+            .unwrap();
+        let legacy = json!({"id": record.id, "value": record.value, "tag": record.tag});
+        validate_write_ack(&record, &legacy).unwrap();
+        let mut echoed = legacy.clone();
+        echoed["content"] = json!(record.content);
+        validate_write_ack(&record, &echoed).unwrap();
+        for (field, value) in [
+            ("id", json!("2")),
+            ("value", json!("2")),
+            ("tag", json!("asmrt.v1.completed")),
+            ("id", json!(1)),
+            ("value", serde_json::Value::Null),
+            ("content", json!("{}")),
+            ("content", serde_json::Value::Null),
+        ] {
+            let mut response = legacy.clone();
+            response[field] = value;
+            assert!(matches!(
+                validate_write_ack(&record, &response),
+                Err(Error::Transport(_))
+            ));
+        }
+    }
 }

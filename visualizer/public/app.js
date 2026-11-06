@@ -43,7 +43,7 @@ const ui = {
   play: byId("play-story"), playLabel: byId("play-label"), playIcon: byId("play-icon"),
   sceneTitle: byId("scene-title"), sceneDescription: byId("scene-description"),
   countdown: byId("countdown-value"), countdownLabel: byId("countdown-label"), hint: byId("playback-hint"),
-  connectionStatus: byId("connection-status"), actionStatus: byId("action-status"),
+  connectionStatus: byId("connection-status"), actionStatus: byId("action-status"), releaseVersion: byId("release-version"),
   connectionError: byId("connection-error"), connectionErrorTitle: byId("connection-error-title"),
   connectionErrorMessage: byId("connection-error-message"), retryConnection: byId("retry-connection"),
   actionError: byId("action-error"), actionErrorMessage: byId("action-error-message"),
@@ -1507,6 +1507,11 @@ function renderEvents(freshEvents) {
 }
 
 function renderSources() {
+  if (state?.version) {
+    text(ui.releaseVersion, state.version.console === state.version.runtime
+      ? `asmRT ${state.version.runtime}`
+      : `Console ${state.version.console} · Runtime ${state.version.runtime} · Rebuild required`);
+  }
   text(ui.sourceEngine, state?.source?.engine ?? "Not reported");
   text(ui.sourceBridge, state?.source?.bridge ?? "Not reported");
   text(ui.sourceMode, state?.source?.mode ?? "Not reported");

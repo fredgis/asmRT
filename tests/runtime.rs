@@ -9,6 +9,58 @@ use std::path::PathBuf;
 
 use asmrt::{Config, Runtime, TaskState};
 
+#[tokio::test]
+async fn divergent_mcp_ack_closes_the_actor_without_retrying_the_write() {
+    let fixture = tempfile::tempdir().unwrap();
+    let backend = fixture.path().join("backend");
+    let data = fixture.path().join("state");
+    std::fs::create_dir_all(backend.join("build")).unwrap();
+    std::fs::create_dir_all(backend.join("mcp").join("src")).unwrap();
+    std::fs::write(
+        backend
+            .join("build")
+            .join(if cfg!(windows) { "asmdb.exe" } else { "asmdb" }),
+        [],
+    )
+    .unwrap();
+    // Protocol fixture only: it never starts an engine or proves native durability.
+    std::fs::write(
+        backend.join("mcp").join("src").join("server.js"),
+        r#"
+const fs = require('node:fs');
+require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result;
+  if (request.method === 'initialize') {
+    result = { protocolVersion: '2024-11-05', serverInfo: { name: 'asmdb' } };
+  } else {
+    const { name, arguments: args } = request.params;
+    fs.appendFileSync('calls.txt', name + '\n');
+    const payload = name === 'db_list' ? { ok: true, rows: [], hasMore: false }
+      : { ok: true, id: args.id, value: args.value, tag: args.tag, content: '{"o":"wrong-owner"}' };
+    result = { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+  }
+  console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+});
+"#,
+    )
+    .unwrap();
+    let runtime = Runtime::open(Config::new(backend, &data)).await.unwrap();
+    let state = runtime.state();
+    assert!(
+        matches!(state.enqueue(1).await, Err(asmrt::Error::Transport(message)) if message.contains("acknowledgement"))
+    );
+    assert!(matches!(state.list().await, Err(asmrt::Error::Closed)));
+    assert!(
+        matches!(runtime.shutdown().await, Err(asmrt::Error::Transport(message)) if message.contains("acknowledgement"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(data.join("calls.txt")).unwrap(),
+        "db_list\ndb_insert\n"
+    );
+}
+
 // Ignored by default: tests supply isolated state to an external, already-built asmDB checkout.
 fn config(directory: &std::path::Path) -> Config {
     let repo = std::env::var_os("ASMRT_ASMDB_REPO")

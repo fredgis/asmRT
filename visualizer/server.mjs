@@ -12,10 +12,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { describeStory } from './story.mjs';
+import { acquireControllerLock } from './controller-lock.mjs';
 import { conversationOptions, conversationTurns, describeConversation, localModelSettings, DISCUSSION, SEQUENTIAL, WORKFLOWS } from './conversation-story.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = path.join(root, 'visualizer', 'public');
+const consoleVersion = (await readFile(path.join(root, 'VERSION'), 'utf8')).trim();
 const ownerMarker = 'asmrt-visualizer-v1\n';
 const activePhases = new Set(['starting', 'running', 'paused', 'stopping']);
 const checkpointStages = new Set(['ready', 'claimed', 'published', 'completed', 'approval']);
@@ -90,6 +92,56 @@ function deadline(promise, milliseconds) {
   ]).finally(() => clearTimeout(timer));
 }
 
+function validateTask(task) {
+  const integer = (value, maximum) => typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value)
+    && value.length <= 20 && BigInt(value) <= maximum;
+  const text = value => typeof value === 'string' && value.length > 0 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+  const definition = task?.definition;
+  if (!task || !integer(task.id, 18446744073709551615n) || task.id === '0'
+      || !integer(task.attempt, 9223372036854775807n)
+      || !['pending', 'running', 'completed'].includes(task.state)
+      || (task.state === 'pending' ? task.owner !== null || task.artifact !== null
+        : task.attempt === '0' || !text(task.owner) || Buffer.byteLength(task.owner) > 32
+          || (task.state === 'running' ? task.artifact !== null : !text(task.artifact)))
+      || (definition !== null && (!text(definition?.reference) || Buffer.byteLength(definition.reference) > 40
+        || !/^[a-f0-9]{64}$/.test(definition.sha256)))) {
+    throw new Error('Invalid native task state.');
+  }
+  const record = task.record;
+  if (record?.id !== task.id || record.value !== task.attempt
+      || record.tag !== `asmrt.v${definition ? 2 : 1}.${task.state}`
+      || typeof record.content !== 'string' || Buffer.byteLength(record.content) > 175
+      || /[\0\t\r\n]/.test(record.content)) throw new Error('Native task record disagrees with its state.');
+  let payload;
+  try { payload = JSON.parse(record.content); } catch { throw new Error('Invalid native task record payload.'); }
+  const expected = { ...(task.owner === null ? {} : { o: task.owner }),
+    ...(task.artifact === null ? {} : { r: task.artifact }),
+    ...(definition ? { d: definition.reference, h: definition.sha256 } : {}) };
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== Object.keys(expected).length
+      || Object.entries(expected).some(([key, value]) => payload[key] !== value)) {
+    throw new Error('Native task record payload disagrees with its state.');
+  }
+}
+
+// Observation is transactional: validate the complete transition before changing
+// any UI task, reply or committed flag. Counters must not lose u64/i64 precision.
+export function validateTaskEvent(event, previous) {
+  validateTask(event.task);
+  const task = event.task;
+  if (!previous || task.id !== event.task_id || task.owner !== event.owner
+      || task.attempt !== event.attempt || task.artifact !== event.artifact
+      || task.definition?.reference !== previous.definition?.reference
+      || task.definition?.sha256 !== previous.definition?.sha256) throw new Error('Unexpected task event.');
+  const claim = event.event === 'task_claimed';
+  if (claim ? previous.state !== 'pending' || task.state !== 'running'
+      || BigInt(task.attempt) !== BigInt(previous.attempt) + 1n
+    : event.event !== 'task_completed' || previous.state !== 'running' || task.state !== 'completed'
+      || task.owner !== previous.owner || task.attempt !== previous.attempt
+      || !previous.published || task.artifact !== previous.published_sha256) {
+    throw new Error('Invalid native task transition or publication evidence.');
+  }
+}
+
 export async function createVisualizer({
   asmdbDir = process.env.ASMRT_ASMDB_REPO,
   binary = path.join(root, 'target', 'debug', process.platform === 'win32' ? 'asmrt.exe' : 'asmrt'),
@@ -139,572 +191,610 @@ export async function createVisualizer({
   let childClosed = Promise.resolve();
   let changing = false;
   let closing = false;
+  let ownershipLost = false;
   let url;
 
+  let ownership;
   try {
-    const saved = JSON.parse((await readSmallFile(manifest, 4096)).toString('utf8'));
-    if (saved.schema !== 1 || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(saved.id)) {
-      throw new Error('Invalid visualizer manifest; no database was opened.');
-    }
-    validateOptions({ tasks: saved.tasks, work_ms: saved.work_ms, guided: saved.guided });
-    if ((saved.story !== undefined && typeof saved.story !== 'boolean') || (saved.story && (saved.tasks !== 8 || saved.guided !== true))) {
-      throw new Error('Invalid saved story configuration; no database was opened.');
-    }
-    if (saved.kind !== undefined && !['demo', 'conversation'].includes(saved.kind)) throw new Error('Unsupported saved run kind.');
-    let chatSettings = {};
-    if (saved.kind === 'conversation') {
-      chatSettings = { ...conversationOptions({ topic: saved.topic, rounds: saved.rounds, workflow: saved.workflow }), ...localModelSettings(saved.model, saved.ollama_url) };
-      if (saved.tasks !== conversationTurns(chatSettings).length || !saved.guided || saved.story || saved.topic !== chatSettings.topic) throw new Error('Invalid saved conversation configuration.');
-    }
-    run = { id: saved.id, directory: path.join(dataRoot, saved.id), tasks: saved.tasks, workers: 4, work_ms: saved.work_ms,
-      guided: saved.guided ?? false, story: saved.story ?? false, kind: saved.kind ?? 'demo', ...chatSettings };
-    phase = 'interrupted';
-  } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
-
-  const append = event => {
-    const { event: name, task_id, owner, attempt, artifact, message } = event;
-    events.push({ sequence: ++sequence, at: new Date().toISOString(), event: name, task_id, owner, attempt, artifact, message });
-    if (events.length > 160) events = events.slice(-160);
-  };
-  const snapshot = () => ({
-    csrf_token: token, phase, run, tasks: [...tasks.values()], events, summary, checkpoint, error, database, conversation,
-    playback: playback ? { ...playback, remaining_ms: Math.ceil(cueDeadline === null ? cueRemaining : Math.max(0, cueDeadline - performance.now())) } : null,
-    pid: child?.exitCode === null && child?.signalCode === null ? child.pid : null,
-    source: { engine, bridge, mode: 'Acknowledged CLI events and real SELECT * reads through the same MCP connection; not CDC or an engine heartbeat.' },
-  });
-
-  // Each active turn keeps its own saved dependency set; completion order does not change context.
-  function synchronizeActive() {
-    conversation.active_turns.sort((left, right) => Number(left.task_id) - Number(right.task_id));
-    conversation.active = conversation.active_turns[0] ?? null;
-  }
-
-  function consume(event) {
-    if (event.event === 'ready') {
-      if (!Array.isArray(event.task_snapshot) || event.task_snapshot.length !== run.tasks) {
-        throw new Error('Missing task snapshot: rebuild asmRT with --events support.');
-      }
-      tasks.clear();
-      for (const task of event.task_snapshot) {
-        tasks.set(task.id, { ...task, published: task.state === 'completed' });
-      }
-      if (run.kind === 'conversation') {
-        const restored = event.conversation;
-        const planned = conversationTurns(run);
-        const done = new Set([...tasks.values()].filter(task => task.state === 'completed').map(task => task.id));
-        const workflow = restored?.workflow ?? { kind: SEQUENTIAL, version: 1 };
-        const matchesTurn = (turn, expected) => turn?.task_id === expected?.task_id && turn?.agent_id === expected?.agent_id
-          && JSON.stringify(turn?.input_ids) === JSON.stringify(expected?.input_ids);
-        if (restored?.schema !== 'asmrt.conversation.v1' || restored.topic !== run.topic
-            || restored.model?.name !== run.model || restored.turns_total !== run.tasks
-            || workflow.kind !== run.workflow || workflow.version !== 1
-            || !Array.isArray(restored.agents) || restored.agents.length !== 4
-            || (restored.turns === undefined ? run.workflow !== SEQUENTIAL
-              : !Array.isArray(restored.turns) || restored.turns.length !== planned.length
-                || restored.turns.some((turn, index) => !matchesTurn(turn, planned[index])))
-            || !Array.isArray(restored.messages) || restored.messages.length !== done.size
-            || new Set(restored.messages.map(message => message.task_id)).size !== done.size
-            || restored.messages.some(message => {
-              const turn = planned.find(turn => turn.task_id === message.task_id);
-              return !turn || !done.has(message.task_id) || message.committed !== true
-                || !matchesTurn(message, turn) || turn.input_ids.some(id => !done.has(id));
-            })) {
-          throw new Error('The saved conversation does not match the acknowledged tasks.');
-        }
-        conversation = { ...restored, workflow, turns: planned,
-          messages: [...restored.messages].sort((left, right) => Number(left.task_id) - Number(right.task_id)),
-          active_turns: [], active: null };
-      }
-      if (phase !== 'stopping') phase = 'running';
-      append({ event: 'ready', message: 'State reloaded from asmDB. Interrupted assignments are pending again.' });
-    } else if (event.event === 'task_claimed' || event.event === 'task_completed') {
-      if (!tasks.has(event.task_id) || event.task?.id !== event.task_id) throw new Error('Unexpected task event.');
-      tasks.set(event.task_id, { ...event.task, published: event.task.state === 'completed' });
-      if (conversation) {
-        if (event.event === 'task_claimed') {
-          const turn = conversation.turns.find(turn => turn.task_id === event.task_id);
-          if (!turn || turn.agent_id !== event.task.owner
-              || conversation.active_turns.some(active => active.task_id === event.task_id)
-              || turn.input_ids.some(id => !conversation.messages.some(message => message.task_id === id && message.committed))) {
-            throw new Error('Claimed conversation job has an invalid role or unfinished dependencies.');
-          }
-          conversation.active_turns.push({ ...turn, stage: 'assigned' });
-        } else {
-          const message = conversation.messages.find(message => message.task_id === event.task_id);
-          if (!message) throw new Error('Conversation completion without an observed reply.');
-          message.committed = true;
-          conversation.active_turns = conversation.active_turns.filter(active => active.task_id !== event.task_id);
-        }
-        synchronizeActive();
-      }
-      append(event);
-    } else if (event.event === 'inference_started') {
-      const active = conversation?.active_turns.find(turn => turn.task_id === event.task_id);
-      if (!active || active.agent_id !== event.agent_id || active.stage !== 'assigned'
-          || JSON.stringify(event.input_ids) !== JSON.stringify(active.input_ids)) {
-        throw new Error('Inference does not match the current agent and saved messages.');
-      }
-      active.stage = 'generating';
-      append({ event: event.event, task_id: event.task_id, owner: event.agent_id, message: 'A real local Ollama request is running.' });
-      synchronizePlayback();
-    } else if (event.event === 'message_published') {
-      const message = event.message;
-      const task = tasks.get(message?.task_id);
-      const active = conversation?.active_turns.find(turn => turn.task_id === message?.task_id);
-      if (!active || !task?.published || task.owner !== message.agent_id
-          || task.definition?.sha256 !== message.job_sha256 || typeof message.text !== 'string' || !message.text.trim()
-          || JSON.stringify(message.input_ids) !== JSON.stringify(active.input_ids)
-          || conversation.messages.some(existing => existing.task_id === message.task_id)) {
-        throw new Error('Published reply does not match its task definition and conversation inputs.');
-      }
-      conversation.messages.push({ ...message, committed: false, reused: event.reused === true });
-      conversation.messages.sort((left, right) => Number(left.task_id) - Number(right.task_id));
-      active.stage = 'saved';
-      append({ event: event.event, task_id: message.task_id, owner: message.agent_id,
-        message: event.reused ? 'Existing reply reused without a model call.' : 'The generated reply was saved; its completion is not committed yet.' });
-      synchronizePlayback();
-    } else if (event.event === 'artifact_published') {
-      const task = tasks.get(event.task_id);
-      if (!task) throw new Error('Artifact event without a task.');
-      task.published = true;
-      task.published_sha256 = event.artifact;
-      append(event);
-    } else if (event.event === 'database_read') {
-      const rows = event.response?.rows;
-      if (event.tool !== 'db_list' || event.arguments?.limit !== 1000 || event.arguments?.offset !== 0
-          || event.response?.ok !== true || !Array.isArray(rows) || rows.length !== run.tasks
-          || new Set(rows.map(row => row.id)).size !== run.tasks
-          || rows.some(row => !tasks.has(row.id) || ['id', 'value', 'tag', 'content'].some(key => row[key] !== tasks.get(row.id).record[key]))) {
-        throw new Error('The asmDB record read does not match the acknowledged task state.');
-      }
-      database = { sequence: ++databaseSequence, at: new Date().toISOString(), launch_id: launchId,
-        tool: event.tool, arguments: event.arguments, commands: event.commands, response: event.response };
-      append({ event: 'database_read', message: `SELECT * returned ${rows.length} records through the existing MCP connection.` });
-    } else if (event.event === 'checkpoint') {
-      if (!run.guided || !checkpointStages.has(event.stage)
-          || !Number.isSafeInteger(event.sequence) || event.sequence <= checkpointSequence
-          || !Array.isArray(event.task_ids) || event.task_ids.some(id => !tasks.has(id))) {
-        throw new Error('Invalid guided checkpoint.');
-      }
-      checkpointSequence = event.sequence;
-      if (phase !== 'stopping') {
-        checkpoint = { id: `${launchId}:${event.sequence}`, sequence: event.sequence, stage: event.stage, task_ids: event.task_ids };
-        phase = 'paused';
-        append({ event: 'checkpoint', message: `Acknowledged checkpoint: ${event.stage}. Rust is waiting for the next cue.` });
-        synchronizePlayback();
-      }
-    } else if (event.event === 'finished') {
-      checkpoint = null;
-      summary = event;
-    } else {
-      throw new Error(`Unexpected CLI event: ${event.event}`);
-    }
-  }
-
-  function cancelCue() {
-    if (cueDeadline !== null) cueRemaining = Math.max(0, cueDeadline - performance.now());
-    clearTimeout(cueTimer);
-    cueTimer = null;
-    cueDeadline = null;
-    cueGeneration++;
-  }
-
-  // Timers advance only acknowledged checkpoints and are invalidated across runs and resets.
-  function preparePlayback(status, kind = run?.kind, settings = run) {
-    cancelCue();
-    cueRemaining = 0;
-    cueAction = null;
-    sceneKey = null;
-    const chat = kind === 'conversation';
-    playback = {
-      status, index: 0, total: chat ? (settings?.workflow === DISCUSSION ? ((settings.rounds ?? 2) + 2) * 3 + 5 : (settings?.rounds ?? 2) * 12 + 5) : 11,
-      duration_ms: 0, transitioning: true,
-      scene: { id: chat ? 'chat-opening' : 'queued', chapter: chat ? 'Conversation' : 'Queue',
-        title: chat ? 'Opening the saved conversation.' : 'Opening asmDB.',
-        description: chat ? 'Reading the local model identity, task definitions and real asmDB records.'
-          : 'Starting Rust, its State Actor and its only database connection.',
-        focus: 'database', next_label: 'Read the task records' },
-    };
-  }
-
-  function pausePlayback() {
-    if (!playback) return;
-    cancelCue();
-    playback.status = 'paused';
-    append({ event: 'playback_paused', message: 'Story timer paused. Any current operation will finish at its next acknowledged checkpoint.' });
-  }
-
-  function synchronizePlayback() {
-    if ((!run?.story && run?.kind !== 'conversation') || !playback || closing) return;
-    if (phase === 'error') {
+    ownership = await acquireControllerLock(binary, asmdbDir, dataRoot, failure => {
+      ownershipLost = true;
+      closing = true;
       cancelCue();
-      playback.status = 'error';
-      playback.transitioning = false;
-      return;
-    }
-    const next = run.kind === 'conversation'
-      ? describeConversation({ phase, checkpoint, tasks: [...tasks.values()], summary, conversation, run })
-      : describeStory({ phase, checkpoint, tasks: [...tasks.values()], summary, database });
-    if (!next) { playback.transitioning = true; return; }
-    const activity = phase === 'running' ? (conversation?.active_turns ?? []).map(turn => `${turn.task_id}:${turn.stage}`).join(',') : '';
-    const key = `${run.id}:${launchId ?? 'restored'}:${checkpoint?.id ?? phase}:${activity}`;
-    if (sceneKey !== key) {
-      cancelCue();
-      sceneKey = key;
-      cueAction = next.action;
-      cueRemaining = next.duration_ms === 0 ? 0 : (storySceneMs ?? next.duration_ms);
-      playback.scene = next.scene;
-      playback.index = next.index;
-      playback.total = next.total;
-      playback.duration_ms = cueRemaining;
-      playback.transitioning = false;
-      if (['verified', 'chat-verified'].includes(next.scene.id)) playback.status = 'finished';
-    }
-    if (playback.status === 'playing' && cueAction && cueTimer === null && !changing) {
-      const expected = { generation: cueGeneration, run: run.id, scene: sceneKey, checkpoint: checkpoint?.id, action: cueAction };
-      cueDeadline = performance.now() + cueRemaining;
-      cueTimer = setTimeout(() => { void runCue(expected); }, cueRemaining);
-    }
-  }
-
-  async function advanceCheckpoint(id, action = 'next') {
-    // The browser's checkpoint ID is fenced to the current launch; the native
-    // sequence then rejects stale stdin commands. Ordinary next cannot approve.
-    if (!child?.stdin?.writable || phase !== 'paused' || checkpoint?.id !== id) {
-      throw new HttpError(409, 'This checkpoint has changed. Refresh before continuing.');
-    }
-    if ((checkpoint.stage === 'approval') !== ['approve', 'reject'].includes(action)) {
-      throw new HttpError(409, 'An approval checkpoint requires an explicit approve or reject action; next cannot approve.');
-    }
-    const command = `${action} ${checkpoint.sequence}\n`;
-    checkpoint = null;
-    phase = 'running';
-    await new Promise((resolve, reject) => child.stdin.write(command, failure => failure ? reject(failure) : resolve()));
-  }
-
-  async function interruptRuntime() {
-    if (!child || !['running', 'paused'].includes(phase)) throw new HttpError(409, 'No running runtime to interrupt.');
-    child.interrupt();
-    await deadline(childClosed, 15000);
-  }
-
-  async function resetDemo() {
-    cancelCue();
-    if (playback) playback.status = 'paused';
-    if (child) { child.interrupt(); await deadline(childClosed, 15000); }
-    // Forget only the selection; saved databases, definitions and replies stay untouched.
-    try { await unlink(manifest); }
-    catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
-    run = null;
-    phase = 'idle';
-    tasks.clear();
-    events = [];
-    sequence = 0;
-    summary = null;
-    checkpoint = null;
-    launchId = null;
-    checkpointSequence = 0;
-    database = null;
-    conversation = null;
-    databaseSequence = 0;
-    playback = null;
-    cueRemaining = 0;
-    cueAction = null;
-    sceneKey = null;
-    error = null;
-  }
-
-  async function runCue(expected) {
-    // A cancelled timer must never affect a later checkpoint, launch or run.
-    if (closing || expected.generation !== cueGeneration || expected.run !== run?.id
-        || expected.scene !== sceneKey || playback?.status !== 'playing') return;
-    cueTimer = null;
-    cueDeadline = null;
-    cueRemaining = 0;
-    if (changing) {
-      cueTimer = setTimeout(() => { void runCue(expected); }, 25);
-      return;
-    }
-    changing = true;
-    playback.transitioning = true;
+      error = `Controller ownership lost: ${failure.message}`;
+      if (child) child.interrupt();
+      else phase = 'error';
+    });
     try {
-      if (expected.action === 'next') await advanceCheckpoint(expected.checkpoint);
-      else if (expected.action === 'interrupt') await interruptRuntime();
-      else if (expected.action === 'resume') {
-        if (child || activePhases.has(phase)) throw new HttpError(409, 'The previous writer has not closed yet.');
-        await launch();
+      const saved = JSON.parse((await readSmallFile(manifest, 4096)).toString('utf8'));
+      if (saved.schema !== 1 || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(saved.id)) {
+        throw new Error('Invalid visualizer manifest; no database was opened.');
       }
-    } catch (failure) {
-      if (!closing) {
+      validateOptions({ tasks: saved.tasks, work_ms: saved.work_ms, guided: saved.guided });
+      if ((saved.story !== undefined && typeof saved.story !== 'boolean') || (saved.story && (saved.tasks !== 8 || saved.guided !== true))) {
+        throw new Error('Invalid saved story configuration; no database was opened.');
+      }
+      if (saved.kind !== undefined && !['demo', 'conversation'].includes(saved.kind)) throw new Error('Unsupported saved run kind.');
+      let chatSettings = {};
+      if (saved.kind === 'conversation') {
+        chatSettings = { ...conversationOptions({ topic: saved.topic, rounds: saved.rounds, workflow: saved.workflow }), ...localModelSettings(saved.model, saved.ollama_url) };
+        if (saved.tasks !== conversationTurns(chatSettings).length || !saved.guided || saved.story || saved.topic !== chatSettings.topic) throw new Error('Invalid saved conversation configuration.');
+      }
+      run = { id: saved.id, directory: path.join(dataRoot, saved.id), tasks: saved.tasks, workers: 4, work_ms: saved.work_ms,
+        guided: saved.guided ?? false, story: saved.story ?? false, kind: saved.kind ?? 'demo', ...chatSettings };
+      phase = 'interrupted';
+    } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
+
+    const append = event => {
+      const { event: name, task_id, owner, attempt, artifact, message } = event;
+      events.push({ sequence: ++sequence, at: new Date().toISOString(), event: name, task_id, owner, attempt, artifact, message });
+      if (events.length > 160) events = events.slice(-160);
+    };
+    const snapshot = () => ({
+      version: { console: consoleVersion, runtime: ownership.version },
+      csrf_token: token, phase, run, tasks: [...tasks.values()], events, summary, checkpoint, error, database, conversation,
+      playback: playback ? { ...playback, remaining_ms: Math.ceil(cueDeadline === null ? cueRemaining : Math.max(0, cueDeadline - performance.now())) } : null,
+      pid: child?.exitCode === null && child?.signalCode === null ? child.pid : null,
+      source: { engine, bridge, mode: 'Acknowledged CLI events and real SELECT * reads through the same MCP connection; not CDC or an engine heartbeat.' },
+    });
+
+    // Each active turn keeps its own saved dependency set; completion order does not change context.
+    function synchronizeActive() {
+      conversation.active_turns.sort((left, right) => Number(left.task_id) - Number(right.task_id));
+      conversation.active = conversation.active_turns[0] ?? null;
+    }
+
+    function consume(event) {
+      if (event.event === 'ready') {
+        if (!Array.isArray(event.task_snapshot) || event.task_snapshot.length !== run.tasks) {
+          throw new Error('Missing task snapshot: rebuild asmRT with --events support.');
+        }
+        const restoredTasks = new Map();
+        for (const task of event.task_snapshot) {
+          validateTask(task);
+          if (task.state === 'running' || BigInt(task.id) > BigInt(run.tasks) || restoredTasks.has(task.id)) {
+            throw new Error('Invalid recovered task snapshot.');
+          }
+          restoredTasks.set(task.id, { ...task, published: task.state === 'completed' });
+        }
+        if (run.kind === 'conversation') {
+          const restored = event.conversation;
+          const planned = conversationTurns(run);
+          const done = new Set([...restoredTasks.values()].filter(task => task.state === 'completed').map(task => task.id));
+          const workflow = restored?.workflow ?? { kind: SEQUENTIAL, version: 1 };
+          const matchesTurn = (turn, expected) => turn?.task_id === expected?.task_id && turn?.agent_id === expected?.agent_id
+            && JSON.stringify(turn?.input_ids) === JSON.stringify(expected?.input_ids);
+          if (restored?.schema !== 'asmrt.conversation.v1' || restored.topic !== run.topic
+              || restored.model?.name !== run.model || restored.turns_total !== run.tasks
+              || workflow.kind !== run.workflow || workflow.version !== 1
+              || !Array.isArray(restored.agents) || restored.agents.length !== 4
+              || (restored.turns === undefined ? run.workflow !== SEQUENTIAL
+                : !Array.isArray(restored.turns) || restored.turns.length !== planned.length
+                  || restored.turns.some((turn, index) => !matchesTurn(turn, planned[index])))
+              || !Array.isArray(restored.messages) || restored.messages.length !== done.size
+              || new Set(restored.messages.map(message => message.task_id)).size !== done.size
+              || restored.messages.some(message => {
+                const turn = planned.find(turn => turn.task_id === message.task_id);
+                return !turn || !done.has(message.task_id) || message.committed !== true
+                  || !matchesTurn(message, turn) || turn.input_ids.some(id => !done.has(id));
+              })) {
+            throw new Error('The saved conversation does not match the acknowledged tasks.');
+          }
+          conversation = { ...restored, workflow, turns: planned,
+            messages: [...restored.messages].sort((left, right) => Number(left.task_id) - Number(right.task_id)),
+            active_turns: [], active: null };
+        }
+        tasks.clear();
+        for (const [id, task] of restoredTasks) tasks.set(id, task);
+        if (phase !== 'stopping') phase = 'running';
+        append({ event: 'ready', message: 'State reloaded from asmDB. Interrupted assignments are pending again.' });
+      } else if (event.event === 'task_claimed' || event.event === 'task_completed') {
+        validateTaskEvent(event, tasks.get(event.task_id));
+        if (conversation) {
+          if (event.event === 'task_claimed') {
+            const turn = conversation.turns.find(turn => turn.task_id === event.task_id);
+            if (!turn || turn.agent_id !== event.task.owner
+                || conversation.active_turns.some(active => active.task_id === event.task_id)
+                || turn.input_ids.some(id => !conversation.messages.some(message => message.task_id === id && message.committed))) {
+              throw new Error('Claimed conversation job has an invalid role or unfinished dependencies.');
+            }
+            conversation.active_turns.push({ ...turn, stage: 'assigned' });
+          } else {
+            const message = conversation.messages.find(message => message.task_id === event.task_id);
+            if (!message) throw new Error('Conversation completion without an observed reply.');
+            message.committed = true;
+            conversation.active_turns = conversation.active_turns.filter(active => active.task_id !== event.task_id);
+          }
+          synchronizeActive();
+        }
+        tasks.set(event.task_id, { ...event.task, published: event.task.state === 'completed' });
+        append(event);
+      } else if (event.event === 'inference_started') {
+        const active = conversation?.active_turns.find(turn => turn.task_id === event.task_id);
+        if (!active || active.agent_id !== event.agent_id || active.stage !== 'assigned'
+            || JSON.stringify(event.input_ids) !== JSON.stringify(active.input_ids)) {
+          throw new Error('Inference does not match the current agent and saved messages.');
+        }
+        active.stage = 'generating';
+        append({ event: event.event, task_id: event.task_id, owner: event.agent_id, message: 'A real local Ollama request is running.' });
+        synchronizePlayback();
+      } else if (event.event === 'message_published') {
+        const message = event.message;
+        const task = tasks.get(message?.task_id);
+        const active = conversation?.active_turns.find(turn => turn.task_id === message?.task_id);
+        if (!active || !task?.published || task.owner !== message.agent_id
+            || task.definition?.sha256 !== message.job_sha256 || typeof message.text !== 'string' || !message.text.trim()
+            || JSON.stringify(message.input_ids) !== JSON.stringify(active.input_ids)
+            || conversation.messages.some(existing => existing.task_id === message.task_id)) {
+          throw new Error('Published reply does not match its task definition and conversation inputs.');
+        }
+        conversation.messages.push({ ...message, committed: false, reused: event.reused === true });
+        conversation.messages.sort((left, right) => Number(left.task_id) - Number(right.task_id));
+        active.stage = 'saved';
+        append({ event: event.event, task_id: message.task_id, owner: message.agent_id,
+          message: event.reused ? 'Existing reply reused without a model call.' : 'The generated reply was saved; its completion is not committed yet.' });
+        synchronizePlayback();
+      } else if (event.event === 'artifact_published') {
+        const task = tasks.get(event.task_id);
+        if (task?.state !== 'running' || task.published || event.owner !== task.owner
+            || event.attempt !== task.attempt || typeof event.artifact !== 'string'
+            || (task.definition ? !/^[a-f0-9]{64}$/.test(event.artifact) : event.artifact !== `artifact:${task.id}`)) {
+          throw new Error('Artifact event does not match the active task claim.');
+        }
+        task.published = true;
+        task.published_sha256 = event.artifact;
+        append(event);
+      } else if (event.event === 'database_read') {
+        const rows = event.response?.rows;
+        if (event.tool !== 'db_list' || event.arguments?.limit !== 1000 || event.arguments?.offset !== 0
+            || event.response?.ok !== true || !Array.isArray(rows) || rows.length !== run.tasks
+            || new Set(rows.map(row => row.id)).size !== run.tasks
+            || rows.some(row => !tasks.has(row.id) || ['id', 'value', 'tag', 'content'].some(key => row[key] !== tasks.get(row.id).record[key]))) {
+          throw new Error('The asmDB record read does not match the acknowledged task state.');
+        }
+        database = { sequence: ++databaseSequence, at: new Date().toISOString(), launch_id: launchId,
+          tool: event.tool, arguments: event.arguments, commands: event.commands, response: event.response };
+        append({ event: 'database_read', message: `SELECT * returned ${rows.length} records through the existing MCP connection.` });
+      } else if (event.event === 'checkpoint') {
+        if (!run.guided || !checkpointStages.has(event.stage)
+            || !Number.isSafeInteger(event.sequence) || event.sequence <= checkpointSequence
+            || !Array.isArray(event.task_ids) || event.task_ids.some(id => !tasks.has(id))) {
+          throw new Error('Invalid guided checkpoint.');
+        }
+        checkpointSequence = event.sequence;
+        if (phase !== 'stopping') {
+          checkpoint = { id: `${launchId}:${event.sequence}`, sequence: event.sequence, stage: event.stage, task_ids: event.task_ids };
+          phase = 'paused';
+          append({ event: 'checkpoint', message: `Acknowledged checkpoint: ${event.stage}. Rust is waiting for the next cue.` });
+          synchronizePlayback();
+        }
+      } else if (event.event === 'finished') {
+        checkpoint = null;
+        summary = event;
+      } else {
+        throw new Error(`Unexpected CLI event: ${event.event}`);
+      }
+    }
+
+    function cancelCue() {
+      if (cueDeadline !== null) cueRemaining = Math.max(0, cueDeadline - performance.now());
+      clearTimeout(cueTimer);
+      cueTimer = null;
+      cueDeadline = null;
+      cueGeneration++;
+    }
+
+    // Timers advance only acknowledged checkpoints and are invalidated across runs and resets.
+    function preparePlayback(status, kind = run?.kind, settings = run) {
+      cancelCue();
+      cueRemaining = 0;
+      cueAction = null;
+      sceneKey = null;
+      const chat = kind === 'conversation';
+      playback = {
+        status, index: 0, total: chat ? (settings?.workflow === DISCUSSION ? ((settings.rounds ?? 2) + 2) * 3 + 5 : (settings?.rounds ?? 2) * 12 + 5) : 11,
+        duration_ms: 0, transitioning: true,
+        scene: { id: chat ? 'chat-opening' : 'queued', chapter: chat ? 'Conversation' : 'Queue',
+          title: chat ? 'Opening the saved conversation.' : 'Opening asmDB.',
+          description: chat ? 'Reading the local model identity, task definitions and real asmDB records.'
+            : 'Starting Rust, its State Actor and its only database connection.',
+          focus: 'database', next_label: 'Read the task records' },
+      };
+    }
+
+    function pausePlayback() {
+      if (!playback) return;
+      cancelCue();
+      playback.status = 'paused';
+      append({ event: 'playback_paused', message: 'Story timer paused. Any current operation will finish at its next acknowledged checkpoint.' });
+    }
+
+    function synchronizePlayback() {
+      if ((!run?.story && run?.kind !== 'conversation') || !playback || closing) return;
+      if (phase === 'error') {
         cancelCue();
         playback.status = 'error';
         playback.transitioning = false;
-        error = failure.message;
-        append({ event: 'error', message: `Automatic playback stopped: ${error}` });
+        return;
       }
-    } finally {
-      changing = false;
-      synchronizePlayback();
+      const next = run.kind === 'conversation'
+        ? describeConversation({ phase, checkpoint, tasks: [...tasks.values()], summary, conversation, run })
+        : describeStory({ phase, checkpoint, tasks: [...tasks.values()], summary, database });
+      if (!next) { playback.transitioning = true; return; }
+      const activity = phase === 'running' ? (conversation?.active_turns ?? []).map(turn => `${turn.task_id}:${turn.stage}`).join(',') : '';
+      const key = `${run.id}:${launchId ?? 'restored'}:${checkpoint?.id ?? phase}:${activity}`;
+      if (sceneKey !== key) {
+        cancelCue();
+        sceneKey = key;
+        cueAction = next.action;
+        cueRemaining = next.duration_ms === 0 ? 0 : (storySceneMs ?? next.duration_ms);
+        playback.scene = next.scene;
+        playback.index = next.index;
+        playback.total = next.total;
+        playback.duration_ms = cueRemaining;
+        playback.transitioning = false;
+        if (['verified', 'chat-verified'].includes(next.scene.id)) playback.status = 'finished';
+      }
+      if (playback.status === 'playing' && cueAction && cueTimer === null && !changing) {
+        const expected = { generation: cueGeneration, run: run.id, scene: sceneKey, checkpoint: checkpoint?.id, action: cueAction };
+        cueDeadline = performance.now() + cueRemaining;
+        cueTimer = setTimeout(() => { void runCue(expected); }, cueRemaining);
+      }
     }
-  }
 
-  function requireEmptyBody(body) {
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
-      throw new HttpError(400, 'This command requires an empty JSON object.');
+    async function advanceCheckpoint(id, action = 'next') {
+      // The browser's checkpoint ID is fenced to the current launch; the native
+      // sequence then rejects stale stdin commands. Ordinary next cannot approve.
+      if (!child?.stdin?.writable || phase !== 'paused' || checkpoint?.id !== id) {
+        throw new HttpError(409, 'This checkpoint has changed. Refresh before continuing.');
+      }
+      if ((checkpoint.stage === 'approval') !== ['approve', 'reject'].includes(action)) {
+        throw new HttpError(409, 'An approval checkpoint requires an explicit approve or reject action; next cannot approve.');
+      }
+      const command = `${action} ${checkpoint.sequence}\n`;
+      checkpoint = null;
+      phase = 'running';
+      await new Promise((resolve, reject) => child.stdin.write(command, failure => failure ? reject(failure) : resolve()));
     }
-  }
 
-  // This manifest selects the run to reopen; it is not the immutable native plan
-  // and cannot establish that any task or reply has been committed.
-  async function persistRun() {
-    const temporary = path.join(dataRoot, `.latest-${randomUUID()}.tmp`);
-    const file = await open(temporary, 'wx');
-    try {
-      await file.writeFile(JSON.stringify({ schema: 1, id: run.id, tasks: run.tasks, work_ms: run.work_ms,
-        guided: run.guided, story: run.story, kind: run.kind,
-        ...(run.kind === 'conversation' ? { topic: run.topic, rounds: run.rounds, workflow: run.workflow, model: run.model, ollama_url: run.ollama_url } : {}) }) + '\n');
-      await file.sync();
-    } finally { await file.close(); }
-    await rename(temporary, manifest);
-  }
+    async function interruptRuntime() {
+      if (!child || !['running', 'paused'].includes(phase)) throw new HttpError(409, 'No running runtime to interrupt.');
+      child.interrupt();
+      await deadline(childClosed, 15000);
+    }
 
-  // Persist the selected plan before spawning one owned writer; await pipe closure before reuse.
-  async function launch(options, story = false, chatSettings = null) {
-    if (options) {
-      validateOptions(options);
-      const id = randomUUID();
-      run = { id, directory: path.join(dataRoot, id), tasks: options.tasks, workers: 4, work_ms: options.work_ms,
-        guided: options.guided ?? false, story, kind: chatSettings ? 'conversation' : 'demo', ...chatSettings };
-      if (!story && !chatSettings) { cancelCue(); playback = null; }
+    async function resetDemo() {
+      cancelCue();
+      if (playback) playback.status = 'paused';
+      if (child) { child.interrupt(); await deadline(childClosed, 15000); }
+      // Forget only the selection; saved databases, definitions and replies stay untouched.
+      try { await unlink(manifest); }
+      catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
+      run = null;
+      phase = 'idle';
+      tasks.clear();
       events = [];
+      sequence = 0;
+      summary = null;
+      checkpoint = null;
+      launchId = null;
+      checkpointSequence = 0;
       database = null;
       conversation = null;
-      tasks.clear();
-    } else if (!run) {
-      throw new HttpError(409, 'There is no saved run to resume.');
+      databaseSequence = 0;
+      playback = null;
+      cueRemaining = 0;
+      cueAction = null;
+      sceneKey = null;
+      error = null;
     }
-    cancelCue();
-    sceneKey = null;
-    if (playback) playback.transitioning = true;
-    phase = 'starting';
-    error = null;
-    summary = null;
-    checkpoint = null;
-    if (conversation) { conversation.active_turns = []; conversation.active = null; }
-    launchId = randomUUID();
-    checkpointSequence = 0;
-    try { await persistRun(); }
-    catch (failure) { phase = 'error'; error = failure.message; throw failure; }
-    if (closing) {
-      phase = 'interrupted';
-      throw new HttpError(409, 'The controller is closing; no runtime was launched.');
-    }
-    append({ event: 'launching', message: 'Opening the Rust runtime and its single asmDB writer.' });
-    const command = run.kind === 'conversation'
-      ? ['chat', `--topic=${run.topic}`, '--model', run.model, '--ollama-url', run.ollama_url, '--rounds', String(run.rounds),
-        '--workflow', run.workflow.slice('conversation.'.length)]
-      : ['demo', '--tasks', String(run.tasks), '--workers', '4', '--work-ms', String(run.work_ms)];
-    const process = spawn(binary, [
-      '--asmdb-dir', asmdbDir, '--data-dir', run.directory,
-      ...command, '--events', ...(run.guided ? ['--guided'] : []),
-    ], { cwd: root, windowsHide: true, stdio: [run.guided ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-    child = process;
-    let buffered = '';
-    let diagnostic = '';
-    let failure = null;
-    let interrupted = false;
-    let finish;
-    childClosed = new Promise(resolve => { finish = resolve; });
-    process.interrupt = () => {
-      interrupted = true;
-      checkpoint = null;
-      phase = 'stopping';
-      process.kill('SIGKILL');
-    };
-    const fail = problem => {
-      failure ??= problem.message;
-      checkpoint = null;
-      process.kill('SIGKILL');
-    };
-    process.on('error', fail);
-    process.stdin?.on('error', fail);
-    process.stderr.setEncoding('utf8');
-    process.stderr.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-8192); });
-    process.stdout.setEncoding('utf8');
-    process.stdout.on('data', chunk => {
-      buffered += chunk;
-      if (buffered.length > 1024 * 1024) { fail(new Error('CLI frame exceeded 1 MiB.')); return; }
-      let end;
-      while ((end = buffered.indexOf('\n')) !== -1) {
-        const line = buffered.slice(0, end);
-        buffered = buffered.slice(end + 1);
-        try { consume(JSON.parse(line)); }
-        catch (problem) { fail(problem); return; }
+
+    async function runCue(expected) {
+      // A cancelled timer must never affect a later checkpoint, launch or run.
+      if (closing || expected.generation !== cueGeneration || expected.run !== run?.id
+          || expected.scene !== sceneKey || playback?.status !== 'playing') return;
+      cueTimer = null;
+      cueDeadline = null;
+      cueRemaining = 0;
+      if (changing) {
+        cueTimer = setTimeout(() => { void runCue(expected); }, 25);
+        return;
       }
-    });
-    // close, unlike exit, also waits for inherited pipe handles to close.
-    process.on('close', code => {
-      child = null;
+      changing = true;
+      playback.transitioning = true;
+      try {
+        if (expected.action === 'next') await advanceCheckpoint(expected.checkpoint);
+        else if (expected.action === 'interrupt') await interruptRuntime();
+        else if (expected.action === 'resume') {
+          if (child || activePhases.has(phase)) throw new HttpError(409, 'The previous writer has not closed yet.');
+          await launch();
+        }
+      } catch (failure) {
+        if (!closing) {
+          cancelCue();
+          playback.status = 'error';
+          playback.transitioning = false;
+          error = failure.message;
+          append({ event: 'error', message: `Automatic playback stopped: ${error}` });
+        }
+      } finally {
+        changing = false;
+        synchronizePlayback();
+      }
+    }
+
+    function requireEmptyBody(body) {
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
+        throw new HttpError(400, 'This command requires an empty JSON object.');
+      }
+    }
+
+    // This manifest selects the run to reopen; it is not the immutable native plan
+    // and cannot establish that any task or reply has been committed.
+    async function persistRun() {
+      const temporary = path.join(dataRoot, `.latest-${randomUUID()}.tmp`);
+      const file = await open(temporary, 'wx');
+      try {
+        await file.writeFile(JSON.stringify({ schema: 1, id: run.id, tasks: run.tasks, work_ms: run.work_ms,
+          guided: run.guided, story: run.story, kind: run.kind,
+          ...(run.kind === 'conversation' ? { topic: run.topic, rounds: run.rounds, workflow: run.workflow, model: run.model, ollama_url: run.ollama_url } : {}) }) + '\n');
+        await file.sync();
+      } finally { await file.close(); }
+      await rename(temporary, manifest);
+    }
+
+    // Persist the selected plan before spawning one owned writer; await pipe closure before reuse.
+    async function launch(options, story = false, chatSettings = null) {
+      if (options) {
+        validateOptions(options);
+        const id = randomUUID();
+        run = { id, directory: path.join(dataRoot, id), tasks: options.tasks, workers: 4, work_ms: options.work_ms,
+          guided: options.guided ?? false, story, kind: chatSettings ? 'conversation' : 'demo', ...chatSettings };
+        if (!story && !chatSettings) { cancelCue(); playback = null; }
+        events = [];
+        database = null;
+        conversation = null;
+        tasks.clear();
+      } else if (!run) {
+        throw new HttpError(409, 'There is no saved run to resume.');
+      }
+      cancelCue();
+      sceneKey = null;
+      if (playback) playback.transitioning = true;
+      phase = 'starting';
+      error = null;
+      summary = null;
       checkpoint = null;
       if (conversation) { conversation.active_turns = []; conversation.active = null; }
-      if (interrupted) {
+      launchId = randomUUID();
+      checkpointSequence = 0;
+      try { await persistRun(); }
+      catch (failure) { phase = 'error'; error = failure.message; throw failure; }
+      if (closing) {
         phase = 'interrupted';
-        summary = null;
-        append({ event: 'interrupted', message: 'Rust process killed. Last observations retained; reopen to reread asmDB.' });
-      } else if (code === 0 && summary?.completed === run.tasks && !failure && buffered.length === 0) {
-        phase = 'finished';
-        append({ event: 'finished', message: `${summary.completed_now} task(s) executed in this pass. Runtime closed cleanly.` });
-      } else {
-        phase = 'error';
-        error = failure ?? (diagnostic.trim() || 'The runtime exited without confirming completion.');
-        summary = null;
-        append({ event: 'error', message: error });
+        throw new HttpError(409, 'The controller is closing; no runtime was launched.');
       }
-      finish();
-      synchronizePlayback();
-    });
-  }
-
-  const send = (response, status, value, contentType = 'application/json; charset=utf-8') => {
-    response.writeHead(status, { 'Content-Type': contentType });
-    response.end(contentType.startsWith('application/json') && !Buffer.isBuffer(value) ? JSON.stringify(value) : value);
-  };
-
-  if (run?.story || run?.kind === 'conversation') { preparePlayback('paused'); synchronizePlayback(); }
-
-  // Browser commands stay loopback/origin/token-bound; artifact reads verify the observed hashes.
-  const server = createServer(async (request, response) => {
-    response.setHeader('Cache-Control', 'no-store');
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Referrer-Policy', 'no-referrer');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'");
-    try {
-      const host = new URL(url).host;
-      if (request.headers.host !== host) throw new HttpError(403, 'Use the local address printed at startup.');
-      const route = new URL(request.url, url).pathname;
-      if (request.method === 'GET' && route === '/api/state') return send(response, 200, snapshot());
-      if (request.method === 'GET' && route === '/api/workflows') return send(response, 200, WORKFLOWS);
-      if (request.method === 'GET' && route === '/favicon.ico') { response.writeHead(204); response.end(); return; }
-      if (request.method === 'GET' && assets.has(route)) {
-        const [filename, type] = assets.get(route);
-        return send(response, 200, await readFile(path.join(publicRoot, filename)), type);
-      }
-      const artifact = /^\/api\/artifacts\/([1-9][0-9]{0,2})$/.exec(route);
-      if (request.method === 'GET' && artifact) {
-        const task = tasks.get(artifact[1]);
-        if (!run || !task?.published) throw new HttpError(404, 'This result file has not been observed yet.');
-        const bytes = await readSmallFile(path.join(run.directory, 'artifacts', `${artifact[1]}.json`), run.kind === 'conversation' ? 128 * 1024 : 4096);
-        if (run.kind === 'conversation' && createHash('sha256').update(bytes).digest('hex') !== (task.artifact ?? task.published_sha256)) {
-          throw new HttpError(409, 'This reply no longer matches its observed SHA-256.');
+      append({ event: 'launching', message: 'Opening the Rust runtime and its single asmDB writer.' });
+      const command = run.kind === 'conversation'
+        ? ['chat', `--topic=${run.topic}`, '--model', run.model, '--ollama-url', run.ollama_url, '--rounds', String(run.rounds),
+          '--workflow', run.workflow.slice('conversation.'.length)]
+        : ['demo', '--tasks', String(run.tasks), '--workers', '4', '--work-ms', String(run.work_ms)];
+      const process = spawn(binary, [
+        '--asmdb-dir', asmdbDir, '--data-dir', run.directory,
+        ...command, '--events', ...(run.guided ? ['--guided'] : []),
+      ], { cwd: root, windowsHide: true, stdio: [run.guided ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      child = process;
+      let buffered = '';
+      let diagnostic = '';
+      let failure = null;
+      let interrupted = false;
+      let finish;
+      childClosed = new Promise(resolve => { finish = resolve; });
+      process.interrupt = () => {
+        interrupted = true;
+        checkpoint = null;
+        phase = 'stopping';
+        process.kill('SIGKILL');
+      };
+      const fail = problem => {
+        failure ??= problem.message;
+        checkpoint = null;
+        process.kill('SIGKILL');
+      };
+      process.on('error', fail);
+      process.stdin?.on('error', fail);
+      process.stderr.setEncoding('utf8');
+      process.stderr.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-8192); });
+      process.stdout.setEncoding('utf8');
+      process.stdout.on('data', chunk => {
+        if (failure || ownershipLost) return;
+        buffered += chunk;
+        if (buffered.length > 1024 * 1024) { fail(new Error('CLI frame exceeded 1 MiB.')); return; }
+        let end;
+        while ((end = buffered.indexOf('\n')) !== -1) {
+          const line = buffered.slice(0, end);
+          buffered = buffered.slice(end + 1);
+          try { consume(JSON.parse(line)); }
+          catch (problem) { fail(problem); return; }
         }
-        return send(response, 200, bytes);
-      }
-      const definition = /^\/api\/definitions\/([1-9][0-9]{0,2})$/.exec(route);
-      if (request.method === 'GET' && definition) {
-        const reference = tasks.get(definition[1])?.definition;
-        if (run?.kind !== 'conversation' || reference?.reference !== `job:${definition[1]}`) {
-          throw new HttpError(404, 'No saved definition has been observed for this task.');
-        }
-        const filename = `definitions/${definition[1]}.json`;
-        const bytes = await readSmallFile(path.join(run.directory, 'definitions', `${definition[1]}.json`), 128 * 1024);
-        if (createHash('sha256').update(bytes).digest('hex') !== reference.sha256) {
-          throw new HttpError(409, 'This definition no longer matches the SHA-256 in asmDB.');
-        }
-        return send(response, 200, { task_id: definition[1], filename, sha256: reference.sha256, content: JSON.parse(bytes.toString('utf8')) });
-      }
-      if (request.method !== 'POST' || !['/api/run', '/api/resume', '/api/interrupt', '/api/next', '/api/action', '/api/play', '/api/pause', '/api/conversation', '/api/storage', '/api/reset'].includes(route)) throw new HttpError(404, 'Unknown route.');
-      if (request.headers.origin !== url || request.headers['x-asmrt-token'] !== token) {
-        throw new HttpError(403, 'Commands are only allowed from this local view.');
-      }
-      const body = await readBody(request);
-      if (closing) throw new HttpError(409, 'The controller is closing.');
-      if (route === '/api/pause') {
-        requireEmptyBody(body);
-        if (playback?.status !== 'playing') throw new HttpError(409, 'No automatic playback is running.');
-        pausePlayback();
-        return send(response, 202, snapshot());
-      }
-      if (changing) throw new HttpError(409, 'Another command is in progress.');
-      changing = true;
-      try {
-        if (route === '/api/reset') {
-          requireEmptyBody(body);
-          await resetDemo();
-        } else if (route === '/api/conversation') {
-          if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting another conversation.');
-          let settings;
-          try { settings = conversationOptions(body); }
-          catch (failure) { throw new HttpError(400, failure.message); }
-          preparePlayback('playing', 'conversation', settings);
-          await launch({ tasks: conversationTurns(settings).length, work_ms: 0, guided: true }, false, { ...settings, ...modelSettings });
-        } else if (route === '/api/storage') {
-          requireEmptyBody(body);
-          if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting a storage story.');
-          preparePlayback('playing', 'demo');
-          await launch({ tasks: 8, work_ms: 600, guided: true }, true);
-        } else if (route === '/api/play') {
-          requireEmptyBody(body);
-          if (playback?.status === 'playing') throw new HttpError(409, 'The story is already playing.');
-          const automatic = run?.story || run?.kind === 'conversation';
-          if (automatic && playback?.status === 'paused') {
-            playback.status = 'playing';
-          } else {
-            if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting a story.');
-            const recovering = automatic && playback?.status === 'error';
-            preparePlayback('playing', recovering ? run.kind : 'demo');
-            if (recovering) await launch();
-            else await launch({ tasks: 8, work_ms: 600, guided: true }, true);
-          }
-        } else if (route === '/api/action') {
-          if (!body || Object.keys(body).length !== 2 || typeof body.checkpoint !== 'string' || !['approve', 'reject'].includes(body.action)) {
-            throw new HttpError(400, 'Provide an approve or reject action and the exact checkpoint identity.');
-          }
-          await advanceCheckpoint(body.checkpoint, body.action);
-        } else if (route === '/api/next') {
-          if (!body || Object.keys(body).length !== 1 || typeof body.checkpoint !== 'string') {
-            throw new HttpError(400, 'The exact current checkpoint identity is required.');
-          }
-          if (playback?.status === 'playing') throw new HttpError(409, 'Pause automatic playback before using manual steps.');
-          await advanceCheckpoint(body.checkpoint);
-        } else if (route === '/api/interrupt') {
-          requireEmptyBody(body);
-          if (!child || !['running', 'paused'].includes(phase)) throw new HttpError(409, 'No running runtime to interrupt.');
-          pausePlayback();
-          await interruptRuntime();
+      });
+      // close, unlike exit, also waits for inherited pipe handles to close.
+      process.on('close', code => {
+        child = null;
+        checkpoint = null;
+        if (conversation) { conversation.active_turns = []; conversation.active = null; }
+        if (ownershipLost) {
+          phase = 'error';
+          summary = null;
+          append({ event: 'error', message: error });
+        } else if (interrupted) {
+          phase = 'interrupted';
+          summary = null;
+          append({ event: 'interrupted', message: 'Rust process killed. Last observations retained; reopen to reread asmDB.' });
+        } else if (code === 0 && summary?.completed === run.tasks && !failure && buffered.length === 0) {
+          phase = 'finished';
+          append({ event: 'finished', message: `${summary.completed_now} task(s) executed in this pass. Runtime closed cleanly.` });
         } else {
-          if (child || activePhases.has(phase)) throw new HttpError(409, 'A runtime is already active; wait for it to close.');
-          if (route === '/api/run') await launch(body);
-          else {
-            requireEmptyBody(body);
-            pausePlayback();
-            await launch();
-          }
+          phase = 'error';
+          error = failure ?? (diagnostic.trim() || 'The runtime exited without confirming completion.');
+          summary = null;
+          append({ event: 'error', message: error });
         }
-      } finally { changing = false; synchronizePlayback(); }
-      return send(response, 202, snapshot());
-    } catch (failure) {
-      if (!response.headersSent) send(response, failure.status ?? (failure.code === 'ENOENT' ? 404 : 500), { error: failure.message });
-      else response.destroy();
+        finish();
+        synchronizePlayback();
+      });
     }
-  });
-  server.requestTimeout = 10000;
-  server.headersTimeout = 5000;
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
-      url = `http://127.0.0.1:${server.address().port}`;
-      resolve();
+
+    const send = (response, status, value, contentType = 'application/json; charset=utf-8') => {
+      response.writeHead(status, { 'Content-Type': contentType });
+      response.end(contentType.startsWith('application/json') && !Buffer.isBuffer(value) ? JSON.stringify(value) : value);
+    };
+
+    if (run?.story || run?.kind === 'conversation') { preparePlayback('paused'); synchronizePlayback(); }
+
+    // Browser commands stay loopback/origin/token-bound; artifact reads verify the observed hashes.
+    const server = createServer(async (request, response) => {
+      response.setHeader('Cache-Control', 'no-store');
+      response.setHeader('X-Content-Type-Options', 'nosniff');
+      response.setHeader('Referrer-Policy', 'no-referrer');
+      response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'");
+      try {
+        const host = new URL(url).host;
+        if (request.headers.host !== host) throw new HttpError(403, 'Use the local address printed at startup.');
+        const route = new URL(request.url, url).pathname;
+        if (request.method === 'GET' && route === '/api/state') return send(response, 200, snapshot());
+        if (request.method === 'GET' && route === '/api/workflows') return send(response, 200, WORKFLOWS);
+        if (request.method === 'GET' && route === '/favicon.ico') { response.writeHead(204); response.end(); return; }
+        if (request.method === 'GET' && assets.has(route)) {
+          const [filename, type] = assets.get(route);
+          const bytes = await readFile(path.join(publicRoot, filename));
+          return send(response, 200, filename === 'index.html'
+            ? bytes.toString('utf8').replace('Version unavailable - restart controller', `asmRT ${consoleVersion}`) : bytes, type);
+        }
+        const artifact = /^\/api\/artifacts\/([1-9][0-9]{0,2})$/.exec(route);
+        if (request.method === 'GET' && artifact) {
+          const task = tasks.get(artifact[1]);
+          if (!run || !task?.published) throw new HttpError(404, 'This result file has not been observed yet.');
+          const bytes = await readSmallFile(path.join(run.directory, 'artifacts', `${artifact[1]}.json`), run.kind === 'conversation' ? 128 * 1024 : 4096);
+          if (run.kind === 'conversation' && createHash('sha256').update(bytes).digest('hex') !== (task.artifact ?? task.published_sha256)) {
+            throw new HttpError(409, 'This reply no longer matches its observed SHA-256.');
+          }
+          return send(response, 200, bytes);
+        }
+        const definition = /^\/api\/definitions\/([1-9][0-9]{0,2})$/.exec(route);
+        if (request.method === 'GET' && definition) {
+          const reference = tasks.get(definition[1])?.definition;
+          if (run?.kind !== 'conversation' || reference?.reference !== `job:${definition[1]}`) {
+            throw new HttpError(404, 'No saved definition has been observed for this task.');
+          }
+          const filename = `definitions/${definition[1]}.json`;
+          const bytes = await readSmallFile(path.join(run.directory, 'definitions', `${definition[1]}.json`), 128 * 1024);
+          if (createHash('sha256').update(bytes).digest('hex') !== reference.sha256) {
+            throw new HttpError(409, 'This definition no longer matches the SHA-256 in asmDB.');
+          }
+          return send(response, 200, { task_id: definition[1], filename, sha256: reference.sha256, content: JSON.parse(bytes.toString('utf8')) });
+        }
+        if (request.method !== 'POST' || !['/api/run', '/api/resume', '/api/interrupt', '/api/next', '/api/action', '/api/play', '/api/pause', '/api/conversation', '/api/storage', '/api/reset'].includes(route)) throw new HttpError(404, 'Unknown route.');
+        if (request.headers.origin !== url || request.headers['x-asmrt-token'] !== token) {
+          throw new HttpError(403, 'Commands are only allowed from this local view.');
+        }
+        const body = await readBody(request);
+        if (closing) throw new HttpError(409, 'The controller is closing.');
+        if (route === '/api/pause') {
+          requireEmptyBody(body);
+          if (playback?.status !== 'playing') throw new HttpError(409, 'No automatic playback is running.');
+          pausePlayback();
+          return send(response, 202, snapshot());
+        }
+        if (changing) throw new HttpError(409, 'Another command is in progress.');
+        changing = true;
+        try {
+          if (route === '/api/reset') {
+            requireEmptyBody(body);
+            await resetDemo();
+          } else if (route === '/api/conversation') {
+            if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting another conversation.');
+            let settings;
+            try { settings = conversationOptions(body); }
+            catch (failure) { throw new HttpError(400, failure.message); }
+            preparePlayback('playing', 'conversation', settings);
+            await launch({ tasks: conversationTurns(settings).length, work_ms: 0, guided: true }, false, { ...settings, ...modelSettings });
+          } else if (route === '/api/storage') {
+            requireEmptyBody(body);
+            if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting a storage story.');
+            preparePlayback('playing', 'demo');
+            await launch({ tasks: 8, work_ms: 600, guided: true }, true);
+          } else if (route === '/api/play') {
+            requireEmptyBody(body);
+            if (playback?.status === 'playing') throw new HttpError(409, 'The story is already playing.');
+            const automatic = run?.story || run?.kind === 'conversation';
+            if (automatic && playback?.status === 'paused') {
+              playback.status = 'playing';
+            } else {
+              if (child || activePhases.has(phase)) throw new HttpError(409, 'Stop the current runtime before starting a story.');
+              const recovering = automatic && playback?.status === 'error';
+              preparePlayback('playing', recovering ? run.kind : 'demo');
+              if (recovering) await launch();
+              else await launch({ tasks: 8, work_ms: 600, guided: true }, true);
+            }
+          } else if (route === '/api/action') {
+            if (!body || Object.keys(body).length !== 2 || typeof body.checkpoint !== 'string' || !['approve', 'reject'].includes(body.action)) {
+              throw new HttpError(400, 'Provide an approve or reject action and the exact checkpoint identity.');
+            }
+            await advanceCheckpoint(body.checkpoint, body.action);
+          } else if (route === '/api/next') {
+            if (!body || Object.keys(body).length !== 1 || typeof body.checkpoint !== 'string') {
+              throw new HttpError(400, 'The exact current checkpoint identity is required.');
+            }
+            if (playback?.status === 'playing') throw new HttpError(409, 'Pause automatic playback before using manual steps.');
+            await advanceCheckpoint(body.checkpoint);
+          } else if (route === '/api/interrupt') {
+            requireEmptyBody(body);
+            if (!child || !['running', 'paused'].includes(phase)) throw new HttpError(409, 'No running runtime to interrupt.');
+            pausePlayback();
+            await interruptRuntime();
+          } else {
+            if (child || activePhases.has(phase)) throw new HttpError(409, 'A runtime is already active; wait for it to close.');
+            if (route === '/api/run') await launch(body);
+            else {
+              requireEmptyBody(body);
+              pausePlayback();
+              await launch();
+            }
+          }
+        } finally { changing = false; synchronizePlayback(); }
+        return send(response, 202, snapshot());
+      } catch (failure) {
+        if (!response.headersSent) send(response, failure.status ?? (failure.code === 'ENOENT' ? 404 : 500), { error: failure.message });
+        else response.destroy();
+      }
     });
-  });
-  return {
-    url,
-    async close() {
-      closing = true;
-      cancelCue();
-      if (child) { child.interrupt(); await deadline(childClosed, 15000); }
-      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    },
-  };
+    server.requestTimeout = 10000;
+    server.headersTimeout = 5000;
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        url = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    });
+    let closePromise;
+    return {
+      url,
+      close() {
+        closePromise ??= (async () => {
+          closing = true;
+          cancelCue();
+          if (child) { child.interrupt(); await deadline(childClosed, 15000); }
+          await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+          await ownership.close();
+        })();
+        return closePromise;
+      },
+    };
+  } catch (failure) {
+    await ownership?.close();
+    throw failure;
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

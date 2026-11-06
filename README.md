@@ -8,6 +8,8 @@ https://github.com/user-attachments/assets/a927841b-71b5-4895-8234-6aa3e1647997
 
 asmRT is a Rust runtime for recoverable agent workflows, built on **[asmDB, the assembly database](https://github.com/fredgis/asmDB)**.
 
+**Release 0.1.1 · 2026-11-06.** The console footer and `asmrt --version` show the release and date. The console reports its own version separately if the running binary differs; rebuild and restart that controller to update it.
+
 **Stateful agents, stateless LLM.** asmDB durably tracks jobs, claims and completion. Immutable JSON files preserve prompts, model settings and replies. asmRT uses that saved work to reconstruct each agent's context; the model itself keeps no memory between calls.
 
 When a process stops, asmRT resumes unfinished work without regenerating validated, committed replies. It is a small, inspectable execution layer for agents whose work needs to outlive a process. The included demo makes that durability visible with a real local-model conversation and an actual crash.
@@ -16,7 +18,7 @@ When a process stops, asmRT resumes unfinished work without regenerating validat
 
 ## Tiny runtime, explicit footprint
 
-**2.66 MiB for the native runtime executable**, including the eight workflow contracts, CLI, task coordination and local-model HTTP client.
+**2.66 MiB for the last measured native runtime executable (0.1.0)**, including the eight workflow contracts, CLI, task coordination and local-model HTTP client.
 
 | Measured artifact | Size |
 | --- | ---: |
@@ -63,7 +65,7 @@ The controller injects a real process crash at a workflow checkpoint, then resta
 
 ## Run the demo
 
-Verified on Windows x86-64. You need Rust/Cargo with its native linker, Node.js, a built [asmDB checkout with MCP dependencies](https://github.com/fredgis/asmDB), and Ollama running locally. The example assumes sibling `repo-asmrt` and `repo-asmdb` folders.
+Verified on Windows x86-64. You need Rust 1.89+ / Cargo with its native linker, Node.js, a built [asmDB checkout with MCP dependencies](https://github.com/fredgis/asmDB), and Ollama running locally. The example assumes sibling `repo-asmrt` and `repo-asmdb` folders.
 
 ```powershell
 Set-Location "$HOME\repo-asmrt"
@@ -72,6 +74,8 @@ ollama pull qwen3.5:0.8b
 ```
 
 Open **http://127.0.0.1:8787**, open the **8 workflows** picker, choose a diagrammed workflow, then click **Start conversation**. The same button pauses and resumes. For **Human approval**, read the proposal and explicitly approve or reject it. Keep the controller terminal open.
+
+A data root belongs to one controller at a time, even on different ports. A second controller using it is rejected before reading the saved run. Reconnect to the existing controller, or use a separate `-DataRoot` and `-Port`. Do not delete `.visualizer-lock`; its presence alone does not mean the root is locked.
 
 ![Eight diagrammed workflow choices in the same two-tab console](Docs/assets/screenshots/workflows.png)
 

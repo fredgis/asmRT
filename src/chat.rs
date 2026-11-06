@@ -185,7 +185,7 @@ impl WorkflowKind {
                 2 => (2, 1),
                 3 => (3, 3),
                 _ if index + 1 == total => (3, index),
-                _ => (if index % 2 == 0 { 1 } else { 2 }, index),
+                _ => (if index.is_multiple_of(2) { 1 } else { 2 }, index),
             },
             Self::Loop => (
                 if index == 0 {
@@ -806,15 +806,12 @@ fn validate_control(
         return Err(invalid("saved control decision disagrees with committed inputs").into());
     }
     let inputs = committed_inputs(job, history)?;
-    if let Some(text) = local_result(kind, job, total, &inputs, &expected) {
-        if text != saved.reply.text
+    if let Some(text) = local_result(kind, job, total, &inputs, &expected)
+        && (text != saved.reply.text
             || saved.reply.prompt_tokens != 0
-            || saved.reply.completion_tokens != 0
-        {
-            return Err(
-                invalid("saved local result disagrees with its deterministic handler").into(),
-            );
-        }
+            || saved.reply.completion_tokens != 0)
+    {
+        return Err(invalid("saved local result disagrees with its deterministic handler").into());
     }
     Ok(())
 }

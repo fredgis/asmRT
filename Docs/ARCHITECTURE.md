@@ -273,7 +273,7 @@ For an observer listing, the existing bridge issues `PAGE 1000 0` followed by `S
 
 The runtime does not issue arbitrary MCP `BEGIN`/`COMMIT` transaction sequences. Single-record transitions plus one authoritative coordinator provide this slice's claim semantics. There is no transaction spanning the filesystem, Ollama, and asmDB.
 
-For writes, the actor checks the acknowledgement's **ID, attempt/value, and tag** before changing its index. It does not reread the entire record after every write; external payload hashes are validated by the application when loading/inspecting files.
+For writes, the actor checks the acknowledgement's **ID, attempt/value, and tag**, as exact strings, before changing its index. The current bridge does **not** echo `content`: this contract trusts the bridge/engine to persist the submitted content and is not full-record read-back proof. If a bridge supplies `content`, it must match exactly as well; divergent or null content fails closed. The runtime does not add a second read after each write. External payload hashes are validated when loading/inspecting files, and native observer reads are checked against acknowledged records. Protocol-fixture tests cover divergent acknowledgements, actor closure and absence of a write retry; real-engine tests cover the current bridge.
 
 ### Error policy
 
@@ -617,6 +617,12 @@ ollama pull qwen3.5:0.8b
 ```
 
 The launcher runs `cargo build --locked --quiet` unless `-SkipBuild` is specified, then starts the Node server. It does **not** automatically open a browser or start a run. Start the conversation or storage story from the console. If the server is already running, reconnect to it rather than opening a competing controller against the same data root.
+
+Normal controller startup holds an exclusive OS file lock on `<dataRoot>\.visualizer-lock` before reading `latest.json`, and retains it until the owned worker and HTTP server have closed. A hidden Rust `controller-lock` helper holds the lock while its stdin pipe is open; it never opens asmDB. EOF, process termination or failed controller startup releases the lock. The permanent file is not a PID marker: never unlink it to reclaim ownership. Different roots remain independent. Unexpected helper loss cancels cues, terminates the owned runtime and rejects further commands. This root lock protects controller metadata; it does not replace asmDB's database writer exclusion or govern independently launched CLI processes.
+
+Native task observations are validated before mutating browser-facing state: the recovered snapshot must have unique, bounded IDs and coherent records; claims increment the attempt of a pending task; completion preserves owner, attempt and definition and requires the observed publication. Record payloads must agree with their task fields. Conversation dependency/reply checks precede commitment. An invalid event stops the worker and preserves the last valid observations instead of showing a forged completion.
+
+[VERSION](../VERSION) identifies the application release and date, independent of durable schema versions. `asmrt --version` and the lock handshake report the compiled identity. Both console views display it in their footer, or show the source-console and runtime identities separately if they differ. Updating source files does not update an already running controller or binary; rebuild and restart explicitly. Rust 1.89+ is required for the standard-library file lock.
 
 `-DataRoot <directory>` and `-Port <port>` select a separate viewer instance; use a separate data root as well as a separate port. Keep the server running to reconnect later. Stop it deliberately when finished; closing a browser tab is not server shutdown.
 
